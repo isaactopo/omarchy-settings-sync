@@ -632,6 +632,13 @@ cmd_restore() {
       commit="$(echo "$row" | jq -r '.commit // ""')"
       enabled="$(echo "$row" | jq -r '.enabled')"
       if [[ -z "$id" ]]; then continue; fi
+      # Treat IDs as untrusted path segments: same shape as manifest IDs,
+      # never dot-dot, never the reserved first-party namespace. Anything
+      # else (e.g. ../../../x) is skipped before it can touch the fs.
+      if [[ ! "$id" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ || "$id" == *".."* || "$id" == omarchy.* ]]; then
+        info "  WARNING: skipping plugin with unsafe id '$id'"
+        continue
+      fi
       if [[ -d "$HOME/.config/omarchy/plugins/$id" ]]; then
         info "  $id already installed — skipping clone"
       else
@@ -648,10 +655,14 @@ cmd_restore() {
         fi
       fi
       # Pin to backed-up commit when we know it (best effort, never fatal).
-      if [[ -n "$commit" && "$commit" != "null" && -d "$HOME/.config/omarchy/plugins/$id/.git" ]]; then
+      # The ref must be a plain hex SHA so no option/ref trickery can ride
+      # along into git checkout; anything else keeps latest with a warning.
+      if [[ "$commit" =~ ^[0-9a-f]{5,64}$ && -d "$HOME/.config/omarchy/plugins/$id/.git" ]]; then
         run_timeout 30 git -C "$HOME/.config/omarchy/plugins/$id" fetch -q 2>/dev/null || true
         run_timeout 30 git -C "$HOME/.config/omarchy/plugins/$id" checkout -q "$commit" 2>/dev/null \
           && info "  $id pinned to $commit" || info "  $id kept at latest (could not check out $commit)"
+      elif [[ -n "$commit" && "$commit" != "null" ]]; then
+        info "  $id kept at latest (ignoring unsafe commit ref)"
       fi
       # Re-apply enabled state.
       if [[ "$enabled" == "true" ]]; then
