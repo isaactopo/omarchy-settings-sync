@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "settings-sync",
   "name": "Settings Sync",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "author": "you",
   "license": "MIT",
   "description": "Back up Omarchy plugins, bar layout, theme, Hyprland and terminal configs to a GitHub repo, then restore them on a fresh install.",
