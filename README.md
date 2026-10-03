@@ -83,6 +83,24 @@ settings-sync-ctl restore --skip-config    # plugins only
 settings-sync-ctl list-plugins
 ```
 
+## Removal
+
+```bash
+omarchy plugin remove settings-sync
+rm -f ~/.local/bin/settings-sync-ctl   # only if installed via ./install.sh
+# optional: rm -rf ~/.config/omarchy/settings-sync ~/.local/share/omarchy-settings-sync
+```
+
+## Dependencies
+
+All standard on Omarchy, except where noted per storage backend:
+
+- `bash`, `git`, `jq` — backup/restore engine
+- `omarchy` CLI + `omarchy-shell` — plugin install, theme/font, shell IPC
+- `gh` — only for the `github` backend (`gh auth login`)
+- `rclone` — only for the `rclone` backend (`omarchy pkg add rclone`)
+- `gum` — optional, prettier confirmations (plain `read` fallback otherwise)
+
 ## What gets backed up
 
 | File in backup repo | Source |
