@@ -15,21 +15,6 @@ bin/settings-sync-ctl  the real backup/restore CLI (also used by the widget)
 install.sh             links CLI to ~/.local/bin + installs/enables the plugin
 ```
 
-## First-time setup (on your main machine)
-
-```bash
-cd ~/Projects/omarchy-settings-sync
-./install.sh
-settings-sync-ctl set-repo git@github.com:you/omarchy-backup.git
-settings-sync-ctl backup --push
-```
-
-Or in one step:
-
-```bash
-settings-sync-ctl init git@github.com:you/omarchy-backup.git
-```
-
 The bar widget shows backup status; its panel has **Back up now** /
 **Restore** buttons and the repo field. Everything the widget does is just
 calling `settings-sync-ctl`, so terminal and UI never drift.

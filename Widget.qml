@@ -29,6 +29,8 @@ Panel {
   property string lastMessage: ""
   property string messageKind: "info" // info | working | ok | error
   property string lastOp: "" // backup | restore — which action produced the current status
+  property bool restorePlugins: true
+  property bool restoreConfigs: true
   property bool showRepoEditor: false
 
   // Where "Click here for the plugin info" points.
@@ -57,11 +59,14 @@ Panel {
   }
 
   function runRestore() {
-    if (root.busy) return
+    if (root.busy || !(root.restorePlugins || root.restoreConfigs)) return
     root.lastOp = "restore"
     root.messageKind = "working"
     root.lastMessage = ""
-    restoreProc.command = [root.ctl, "restore", "--yes"]
+    var cmd = [root.ctl, "restore", "--yes"]
+    if (!root.restorePlugins) cmd.push("--skip-plugins")
+    if (!root.restoreConfigs) cmd.push("--skip-config")
+    restoreProc.command = cmd
     restoreProc.running = true
   }
 
@@ -373,11 +378,37 @@ Panel {
             fontFamily: root.bar.fontFamily
           }
 
+          Toggle {
+            width: parent.width
+            label: "Plugins"
+            description: "Reinstall third-party shell plugins"
+            checked: root.restorePlugins
+            foreground: root.bar.foreground
+            fontFamily: root.bar.fontFamily
+            opacity: root.busy ? 0.45 : 1
+            onClicked: {
+              if (!root.busy) root.restorePlugins = !root.restorePlugins
+            }
+          }
+
+          Toggle {
+            width: parent.width
+            label: "Configs"
+            description: "Overwrite bar layout, theme, Hyprland and app configs"
+            checked: root.restoreConfigs
+            foreground: root.bar.foreground
+            fontFamily: root.bar.fontFamily
+            opacity: root.busy ? 0.45 : 1
+            onClicked: {
+              if (!root.busy) root.restoreConfigs = !root.restoreConfigs
+            }
+          }
+
           Button {
             width: parent.width
             text: restoreProc.running ? "Restoring…" : "Restore from backup"
             bordered: true
-            enabled: !root.busy
+            enabled: !root.busy && (root.restorePlugins || root.restoreConfigs)
             foreground: root.bar.foreground
             fontFamily: root.bar.fontFamily
             onClicked: root.runRestore()
@@ -385,7 +416,7 @@ Panel {
 
           Text {
             width: parent.width
-            text: "Reinstalls plugins and overwrites local configs. Your current setup is snapshotted first."
+            text: "Your current setup is snapshotted first."
             color: Qt.darker(root.bar.foreground, 1.4)
             font.family: root.bar.fontFamily
             font.pixelSize: Style.font.caption
