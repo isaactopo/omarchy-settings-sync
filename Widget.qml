@@ -70,7 +70,7 @@ Panel {
     anchors.fill: parent
     bar: root.bar
     tooltipText: Model.tooltipText(root.syncState)
-    iconText: Model.glyphFor(root.syncState)
+    text: Model.glyphFor(root.syncState)
     onPressed: function(b) { root.toggle() }
   }
 
