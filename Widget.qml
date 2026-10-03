@@ -27,7 +27,13 @@ Panel {
 
   property string repoDraft: ""
   property string lastMessage: ""
+  property string messageKind: "info" // info | working | ok | error
   property bool showRepoEditor: false
+
+  // The exact line a fresh machine needs; copied to the clipboard on demand.
+  readonly property string restoreCommand: root.syncState.hasRepo
+    ? "settings-sync-ctl restore --repo " + root.syncState.repo + " --yes"
+    : ""
 
   function refresh() {
     if (!statusProc.running) statusProc.running = true
@@ -44,6 +50,7 @@ Panel {
 
   function runBackup() {
     if (root.busy) return
+    root.messageKind = "working"
     root.lastMessage = "Backing up…"
     backupProc.command = [root.ctl, "backup", "--push"]
     backupProc.running = true
@@ -51,7 +58,8 @@ Panel {
 
   function runRestore() {
     if (root.busy) return
-    root.lastMessage = "Restoring… (configs snapshotted first)"
+    root.messageKind = "working"
+    root.lastMessage = "Restoring… current setup is snapshotted first"
     restoreProc.command = [root.ctl, "restore", "--yes"]
     restoreProc.running = true
   }
@@ -60,6 +68,33 @@ Panel {
     if (setRepoProc.running || root.repoDraft === "") return
     setRepoProc.command = [root.ctl, "set-repo", root.repoDraft]
     setRepoProc.running = true
+  }
+
+  function copyRestoreCommand() {
+    if (root.restoreCommand === "" || copyProc.running) return
+    copyProc.secret = root.restoreCommand
+    copyProc.running = true
+    root.messageKind = "info"
+    root.lastMessage = "Restore command copied to clipboard"
+  }
+
+  function finishRun(proc, errText, okText) {
+    if (proc.exitCode === 0) {
+      root.messageKind = "ok"
+      root.lastMessage = okText
+    } else {
+      root.messageKind = "error"
+      var detail = (errText || "").trim().split("\n").slice(-2).join(" ")
+      root.lastMessage = detail !== "" ? detail : "Failed with exit code " + proc.exitCode
+    }
+    root.refresh()
+  }
+
+  function messageColor() {
+    if (root.messageKind === "error") return Color.urgent
+    if (root.messageKind === "ok") return Color.accent
+    if (root.messageKind === "working") return root.bar.foreground
+    return Qt.darker(root.bar.foreground, 1.4)
   }
 
   implicitWidth: button.implicitWidth
@@ -122,18 +157,18 @@ Panel {
           }
         }
 
-        // --- repo --------------------------------------------------
+        // --- empty state: no repo yet ----------------------------------
         Column {
           width: parent.width
           spacing: Style.spacing.sm
-          visible: root.showRepoEditor || !root.syncState.hasRepo
+          visible: !root.syncState.hasRepo
 
           Text {
             width: parent.width
-            text: "Backup repo (GitHub URL or local path)"
+            text: "Back up plugins, layout, theme and configs to a git repo, then restore them on a fresh install. Start with the repo:"
             color: root.bar.foreground
             font.family: root.bar.fontFamily
-            font.pixelSize: Style.font.caption
+            font.pixelSize: Style.font.body
             wrapMode: Text.WordWrap
           }
 
@@ -148,6 +183,7 @@ Panel {
 
           Button {
             text: "Save repo"
+            selected: true
             enabled: root.repoDraft !== "" && !setRepoProc.running
             foreground: root.bar.foreground
             fontFamily: root.bar.fontFamily
@@ -155,98 +191,189 @@ Panel {
           }
         }
 
-        // When a repo is set and editor hidden, show it compactly.
-        Row {
-          width: parent.width
-          spacing: Style.spacing.sm
-          visible: root.syncState.hasRepo && !root.showRepoEditor
-
-          Text {
-            width: parent.width - editBtn.width - parent.spacing
-            text: Model.shortRepo(root.syncState.repo)
-            color: Qt.darker(root.bar.foreground, 1.3)
-            font.family: root.bar.fontFamily
-            font.pixelSize: Style.font.caption
-            elide: Text.ElideMiddle
-          }
-
-          Button {
-            id: editBtn
-            iconText: "󰏫"
-            tooltipText: "Change repo"
-            foreground: root.bar.foreground
-            fontFamily: root.bar.fontFamily
-            onClicked: {
-              root.repoDraft = root.syncState.repo
-              root.showRepoEditor = true
-            }
-          }
-        }
-
-        // --- facts ---------------------------------------------------
+        // --- backup ------------------------------------------------------
         Column {
           width: parent.width
-          spacing: Style.spacing.xs
-          visible: root.syncState.hasRepo
-
-          Text {
-            width: parent.width
-            text: "Theme: " + (root.syncState.theme || "—") + "  ·  " + root.syncState.pluginCount + " plugin(s)"
-            color: Qt.darker(root.bar.foreground, 1.3)
-            font.family: root.bar.fontFamily
-            font.pixelSize: Style.font.caption
-            wrapMode: Text.WordWrap
-          }
-          Text {
-            width: parent.width
-            visible: root.syncState.hasBackup
-            text: "Last backup: " + root.syncState.lastBackup + (root.syncState.lastBackupHost ? " on " + root.syncState.lastBackupHost : "")
-            color: Qt.darker(root.bar.foreground, 1.3)
-            font.family: root.bar.fontFamily
-            font.pixelSize: Style.font.caption
-            wrapMode: Text.WordWrap
-          }
-        }
-
-        // --- actions ---------------------------------------------------
-        Row {
-          width: parent.width
           spacing: Style.spacing.sm
           visible: root.syncState.hasRepo
 
+          PanelSectionHeader {
+            width: parent.width
+            text: "Backup"
+            foreground: root.bar.foreground
+            fontFamily: root.bar.fontFamily
+          }
+
+          Row {
+            width: parent.width
+            spacing: Style.spacing.sm
+
+            Text {
+              width: parent.width - changeBtn.width - parent.spacing
+              anchors.verticalCenter: parent.verticalCenter
+              text: Model.shortRepo(root.syncState.repo)
+              color: Qt.darker(root.bar.foreground, 1.3)
+              font.family: root.bar.fontFamily
+              font.pixelSize: Style.font.caption
+              elide: Text.ElideMiddle
+            }
+
+            Button {
+              id: changeBtn
+              text: "Change"
+              enabled: !root.busy
+              foreground: root.bar.foreground
+              fontFamily: root.bar.fontFamily
+              onClicked: {
+                root.repoDraft = root.syncState.repo
+                root.showRepoEditor = !root.showRepoEditor
+              }
+            }
+          }
+
+          Column {
+            width: parent.width
+            spacing: Style.spacing.sm
+            visible: root.showRepoEditor
+
+            TextField {
+              width: parent.width
+              text: root.repoDraft
+              font.family: root.bar.fontFamily
+              onTextChanged: root.repoDraft = text
+              onAccepted: root.saveRepo()
+            }
+
+            Row {
+              width: parent.width
+              spacing: Style.spacing.sm
+
+              Button {
+                text: "Save"
+                selected: true
+                enabled: root.repoDraft !== "" && !setRepoProc.running
+                foreground: root.bar.foreground
+                fontFamily: root.bar.fontFamily
+                onClicked: root.saveRepo()
+              }
+
+              Button {
+                text: "Cancel"
+                enabled: !setRepoProc.running
+                foreground: root.bar.foreground
+                fontFamily: root.bar.fontFamily
+                onClicked: root.showRepoEditor = false
+              }
+            }
+          }
+
+          Text {
+            width: parent.width
+            text: root.syncState.pluginCount + " plugins · " + (root.syncState.theme || "—")
+              + (root.syncState.hasBackup && root.syncState.lastBackup !== ""
+                ? "\nLast backup " + root.syncState.lastBackup
+                  + (root.syncState.lastBackupHost ? " on " + root.syncState.lastBackupHost : "")
+                : "\nNo backup yet")
+            color: Qt.darker(root.bar.foreground, 1.3)
+            font.family: root.bar.fontFamily
+            font.pixelSize: Style.font.caption
+            wrapMode: Text.WordWrap
+          }
+
           Button {
-            text: root.busy ? "Working…" : "Back up now"
+            width: parent.width
+            text: backupProc.running ? "Backing up…" : "Back up now"
+            selected: true
             enabled: !root.busy
             foreground: root.bar.foreground
             fontFamily: root.bar.fontFamily
             onClicked: root.runBackup()
           }
+        }
+
+        PanelSeparator {
+          width: parent.width
+          foreground: root.bar.foreground
+          visible: root.syncState.hasRepo
+        }
+
+        // --- restore -------------------------------------------------------
+        Column {
+          width: parent.width
+          spacing: Style.spacing.sm
+          visible: root.syncState.hasRepo
+
+          PanelSectionHeader {
+            width: parent.width
+            text: "Restore"
+            foreground: root.bar.foreground
+            fontFamily: root.bar.fontFamily
+          }
 
           Button {
-            text: "Restore"
-            tooltipText: "Restore configs + plugins from the repo (snapshots current state first)"
+            width: parent.width
+            text: restoreProc.running ? "Restoring…" : "Restore from backup"
+            bordered: true
             enabled: !root.busy
             foreground: root.bar.foreground
             fontFamily: root.bar.fontFamily
             onClicked: root.runRestore()
           }
+
+          Text {
+            width: parent.width
+            text: "Reinstalls plugins and overwrites local configs. Your current setup is snapshotted first."
+            color: Qt.darker(root.bar.foreground, 1.4)
+            font.family: root.bar.fontFamily
+            font.pixelSize: Style.font.caption
+            wrapMode: Text.WordWrap
+          }
         }
 
+        PanelSeparator {
+          width: parent.width
+          foreground: root.bar.foreground
+          visible: root.syncState.hasRepo
+        }
+
+        // --- fresh install ---------------------------------------------------
+        Column {
+          width: parent.width
+          spacing: Style.spacing.sm
+          visible: root.syncState.hasRepo
+
+          PanelSectionHeader {
+            width: parent.width
+            text: "Fresh install"
+            foreground: root.bar.foreground
+            fontFamily: root.bar.fontFamily
+          }
+
+          Text {
+            width: parent.width
+            textFormat: Text.PlainText
+            text: root.restoreCommand
+            color: root.bar.foreground
+            font.family: root.bar.fontFamily
+            font.pixelSize: Style.font.caption
+            wrapMode: Text.WrapAnywhere
+          }
+
+          Button {
+            text: "Copy restore command"
+            enabled: !copyProc.running
+            foreground: root.bar.foreground
+            fontFamily: root.bar.fontFamily
+            onClicked: root.copyRestoreCommand()
+          }
+        }
+
+        // --- feedback ----------------------------------------------------------
         Text {
           width: parent.width
-          visible: root.lastMessage !== ""
+          visible: root.lastMessage !== "" && root.syncState.hasRepo
           text: root.lastMessage
-          color: root.bar.foreground
-          font.family: root.bar.fontFamily
-          font.pixelSize: Style.font.caption
-          wrapMode: Text.WordWrap
-        }
-
-        Text {
-          width: parent.width
-          textFormat: Text.PlainText
-          text: "Fresh install? Install this plugin, then run:\nsettings-sync-ctl restore --repo <your-github-url> --yes"
-          color: Qt.darker(root.bar.foreground, 1.4)
+          color: root.messageColor()
           font.family: root.bar.fontFamily
           font.pixelSize: Style.font.caption
           wrapMode: Text.WordWrap
@@ -276,36 +403,30 @@ Panel {
 
   Process {
     id: backupProc
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: {
-        root.lastMessage = text.trim() === "" ? "Backup finished." : text.trim().split("\n").slice(-3).join("\n")
-      }
-    }
+    property string err: ""
+    stdout: StdioCollector { waitForEnd: true }
     stderr: StdioCollector {
       waitForEnd: true
-      onStreamFinished: {
-        if (text.trim() !== "") root.lastMessage = text.trim().split("\n").slice(-3).join("\n")
-      }
+      onStreamFinished: backupProc.err = text
     }
-    onRunningChanged: if (!running) root.refresh()
+    onRunningChanged: {
+      if (running) return
+      root.finishRun(backupProc, backupProc.err, "Backup complete and pushed.")
+    }
   }
 
   Process {
     id: restoreProc
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: {
-        root.lastMessage = text.trim() === "" ? "Restore finished." : text.trim().split("\n").slice(-3).join("\n")
-      }
-    }
+    property string err: ""
+    stdout: StdioCollector { waitForEnd: true }
     stderr: StdioCollector {
       waitForEnd: true
-      onStreamFinished: {
-        if (text.trim() !== "") root.lastMessage = text.trim().split("\n").slice(-3).join("\n")
-      }
+      onStreamFinished: restoreProc.err = text
     }
-    onRunningChanged: if (!running) root.refresh()
+    onRunningChanged: {
+      if (running) return
+      root.finishRun(restoreProc, restoreProc.err, "Restore complete.")
+    }
   }
 
   Process {
@@ -314,6 +435,18 @@ Panel {
       if (running) return
       root.showRepoEditor = false
       root.refresh()
+    }
+  }
+
+  Process {
+    id: copyProc
+    command: ["wl-copy"]
+    property string secret: ""
+    stdinEnabled: true
+    onStarted: {
+      write(secret)
+      secret = ""
+      stdinEnabled = false
     }
   }
 }
