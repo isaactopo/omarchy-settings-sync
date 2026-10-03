@@ -1,0 +1,540 @@
+#!/bin/bash
+# settings-sync-ctl — backup & restore Omarchy setup to a git repo (GitHub).
+#
+# Usage:
+#   settings-sync-ctl status [--json]
+#   settings-sync-ctl set-repo <git-url-or-local-path>
+#   settings-sync-ctl get-repo
+#   settings-sync-ctl backup [--push] [--message MSG] [--repo URL]
+#   settings-sync-ctl restore [--repo URL] [--yes] [--with-packages] [--skip-plugins] [--skip-config]
+#   settings-sync-ctl list-plugins
+#   settings-sync-ctl init <github-repo-url>
+#
+# The backup repo layout:
+#   backup.json            metadata (date, host, theme, font, omarchy version)
+#   plugins.json           third-party shell plugins [{id, url, commit, enabled}]
+#   shell.json             copy of ~/.config/omarchy/shell.json
+#   theme.txt / font.txt
+#   hypr/                  *.lua *.conf from ~/.config/hypr
+#   omarchy/menu.jsonc     copy of extensions/omarchy-menu.jsonc
+#   omarchy/workspace-layout.json
+#   omarchy/shell.toml
+#   omarchy/hooks/         user hooks (skips *.sample)
+#   terminals/alacritty.toml, terminals/kitty.conf, terminals/ghostty-config, terminals/foot.ini
+#   starship.toml, gitconfig, btop/btop.conf, lazygit/config.yml
+#   themes-custom/         anything under ~/.config/omarchy/themes/
+#   packages.explicit      pacman -Qqe
+#   packages.aur           pacman -Qqm
+#
+# Restore backs up whatever it is about to overwrite into
+# ~/.config/omarchy/settings-sync/backups/<timestamp>/ first.
+
+set -uo pipefail
+
+CONFIG_DIR="$HOME/.config/omarchy/settings-sync"
+REPO_FILE="$CONFIG_DIR/repo"
+LAST_FILE="$CONFIG_DIR/last-backup.json"
+CHECKOUT_DIR="$HOME/.local/share/omarchy-settings-sync/backup"
+BACKUPS_ROOT="$CONFIG_DIR/backups"
+
+mkdir -p "$CONFIG_DIR"
+
+fail() { echo "settings-sync: $*" >&2; exit 1; }
+info() { echo "settings-sync: $*" >&2; }
+
+interactive() { [[ -t 0 && -t 1 ]]; }
+
+saved_repo() {
+  if [[ -f "$REPO_FILE" ]]; then
+    cat "$REPO_FILE"
+  fi
+}
+
+resolve_repo() {
+  # Echoes effective repo (arg wins, else saved file), fails if none.
+  local override="${1:-}"
+  if [[ -n "$override" ]]; then
+    printf '%s\n' "$override"
+    return 0
+  fi
+  local saved
+  saved="$(saved_repo)"
+  if [[ -n "$saved" ]]; then
+    printf '%s\n' "$saved"
+    return 0
+  fi
+  return 1
+}
+
+is_remote() { [[ "$1" == *"://"* || "$1" == git@* ]]; }
+
+# Wrapper so QML-triggered runs can never hang the shell: every network or
+# service-touching step gets a timeout (coreutils `timeout` is stock on Arch).
+run_timeout() {
+  local secs="$1"; shift
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "$secs" "$@"
+  else
+    "$@"
+  fi
+}
+
+ensure_checkout() {
+  # $1 = repo. Prepares $CHECKOUT_DIR as a checkout of it.
+  local repo="$1"
+  if is_remote "$repo"; then
+    if [[ -d "$CHECKOUT_DIR/.git" ]]; then
+      local current
+      current="$(git -C "$CHECKOUT_DIR" remote get-url origin 2>/dev/null || true)"
+      if [[ "$current" != "$repo" ]]; then
+        info "checkout points at $current, re-cloning for $repo"
+        rm -rf "$CHECKOUT_DIR"
+        git clone "$repo" "$CHECKOUT_DIR" || fail "could not clone $repo (need access? try: gh auth login)"
+      else
+        run_timeout 60 git -C "$CHECKOUT_DIR" pull --rebase --autostash 2>/dev/null || info "could not pull latest (offline? continuing)"
+      fi
+    else
+      mkdir -p "$(dirname "$CHECKOUT_DIR")"
+      rm -rf "$CHECKOUT_DIR"
+      export GIT_TERMINAL_PROMPT=0
+      run_timeout 120 git clone "$repo" "$CHECKOUT_DIR" || fail "could not clone $repo (need access? try: gh auth login)"
+    fi
+  else
+    # Local path: use it directly, init git if needed.
+    mkdir -p "$repo"
+    if [[ ! -d "$repo/.git" ]]; then
+      git -C "$repo" init -q 2>/dev/null || fail "could not init git in $repo"
+    fi
+    # Point CHECKOUT_DIR at it via symlink-ish behavior: just use the path.
+    CHECKOUT_DIR="$repo"
+  fi
+}
+
+collect_files() {
+  # $1 = dest dir. Copies configs + writes metadata. Echoes plugin count.
+  local dest="$1"
+  mkdir -p "$dest"
+
+  local theme font omarchy_version
+  theme="$(omarchy theme current 2>/dev/null || echo unknown)"
+  font="$(omarchy font current 2>/dev/null || echo unknown)"
+  omarchy_version="$(omarchy version 2>/dev/null || echo unknown)"
+
+  # --- metadata -------------------------------------------------------
+  jq -n \
+    --arg date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    --arg host "$(hostname)" \
+    --arg user "$(whoami)" \
+    --arg theme "$theme" \
+    --arg font "$font" \
+    --arg omarchy "$omarchy_version" \
+    '{date:$date, host:$host, user:$user, theme:$theme, font:$font, omarchyVersion:$omarchy}' \
+    > "$dest/backup.json"
+
+  printf '%s\n' "$theme" > "$dest/theme.txt"
+  printf '%s\n' "$font" > "$dest/font.txt"
+
+  # --- shell.json (bar layout + plugin enablement) --------------------
+  if [[ -f "$HOME/.config/omarchy/shell.json" ]]; then
+    cp "$HOME/.config/omarchy/shell.json" "$dest/shell.json"
+  fi
+
+  # --- plugins.json (third-party only, with git url + commit) ---------
+  local plugins_json="[]"
+  if command -v omarchy-shell >/dev/null 2>&1; then
+    plugins_json="$(omarchy-shell shell listPlugins 2>/dev/null || echo '[]')"
+  fi
+  local tmp_ids
+  tmp_ids="$(mktemp)"
+  echo "$plugins_json" | jq -r '.[] | select(.firstParty != true) | .id' > "$tmp_ids" 2>/dev/null || true
+  local out="["
+  local first=1
+  local count=0
+  while IFS= read -r pid; do
+    [[ -n "$pid" ]] || continue
+    local pdir="$HOME/.config/omarchy/plugins/$pid"
+    local url="" commit="" enabled=false
+    enabled="$(echo "$plugins_json" | jq -r --arg id "$pid" '.[] | select(.id==$id) | .enabled')"
+    [[ "$enabled" == "true" ]] || enabled=false
+    if [[ -d "$pdir/.git" ]]; then
+      url="$(git -C "$pdir" remote get-url origin 2>/dev/null || true)"
+      commit="$(git -C "$pdir" rev-parse HEAD 2>/dev/null || true)"
+    fi
+    # Fall back: clonedFrom field if no git remote (user-cloned built-ins)
+    if [[ -z "$url" ]]; then
+      url="$(echo "$plugins_json" | jq -r --arg id "$pid" '.[] | select(.id==$id) | (.clonedFrom // "")')"
+    fi
+    local entry
+    entry="$(jq -n --arg id "$pid" --arg url "$url" --arg commit "$commit" --argjson enabled "$([[ "$enabled" == "true" ]] && echo true || echo false)" \
+      '{id:$id, url:$url, commit:$commit, enabled:$enabled}')"
+    if (( first )); then first=0; else out="$out,"; fi
+    out="$out$entry"
+    count=$((count + 1))
+  done < "$tmp_ids"
+  rm -f "$tmp_ids"
+  out="$out]"
+  echo "$out" | jq '.' > "$dest/plugins.json"
+  echo "$count" > "$dest/.plugin-count"
+
+  # --- hypr ------------------------------------------------------------
+  mkdir -p "$dest/hypr"
+  for f in "$HOME/.config/hypr/"*.lua "$HOME/.config/hypr/"*.conf; do
+    [[ -f "$f" ]] || continue
+    case "$(basename "$f")" in *.bak.*) continue;; esac
+    cp "$f" "$dest/hypr/"
+  done
+
+  # --- omarchy extras ---------------------------------------------------
+  mkdir -p "$dest/omarchy/hooks"
+  [[ -f "$HOME/.config/omarchy/extensions/omarchy-menu.jsonc" ]] && cp "$HOME/.config/omarchy/extensions/omarchy-menu.jsonc" "$dest/omarchy/menu.jsonc"
+  [[ -f "$HOME/.config/omarchy/workspace-layout.json" ]] && cp "$HOME/.config/omarchy/workspace-layout.json" "$dest/omarchy/workspace-layout.json"
+  [[ -f "$HOME/.config/omarchy/shell.toml" ]] && cp "$HOME/.config/omarchy/shell.toml" "$dest/omarchy/shell.toml"
+  if [[ -d "$HOME/.config/omarchy/hooks" ]]; then
+    # Copy hook dirs but skip *.sample files (stock examples).
+    (cd "$HOME/.config/omarchy/hooks" && find . -type f ! -name '*.sample' -print0 | tar --null -cf - -T - 2>/dev/null | tar -xf - -C "$dest/omarchy/hooks" 2>/dev/null) || true
+  fi
+
+  # --- terminals / misc --------------------------------------------------
+  mkdir -p "$dest/terminals"
+  [[ -f "$HOME/.config/alacritty/alacritty.toml" ]] && cp "$HOME/.config/alacritty/alacritty.toml" "$dest/terminals/alacritty.toml"
+  [[ -f "$HOME/.config/kitty/kitty.conf" ]] && cp "$HOME/.config/kitty/kitty.conf" "$dest/terminals/kitty.conf"
+  [[ -f "$HOME/.config/ghostty/config" ]] && cp "$HOME/.config/ghostty/config" "$dest/terminals/ghostty-config"
+  [[ -f "$HOME/.config/foot/foot.ini" ]] && cp "$HOME/.config/foot/foot.ini" "$dest/terminals/foot.ini"
+
+  [[ -f "$HOME/.config/starship.toml" ]] && cp "$HOME/.config/starship.toml" "$dest/starship.toml"
+  [[ -f "$HOME/.config/git/config" ]] && cp "$HOME/.config/git/config" "$dest/gitconfig"
+  mkdir -p "$dest/btop" "$dest/lazygit"
+  [[ -f "$HOME/.config/btop/btop.conf" ]] && cp "$HOME/.config/btop/btop.conf" "$dest/btop/btop.conf"
+  [[ -f "$HOME/.config/lazygit/config.yml" ]] && cp "$HOME/.config/lazygit/config.yml" "$dest/lazygit/config.yml"
+
+  # --- custom themes ------------------------------------------------------
+  if [[ -d "$HOME/.config/omarchy/themes" ]]; then
+    mkdir -p "$dest/themes-custom"
+    for t in "$HOME/.config/omarchy/themes/"*; do
+      [[ -e "$t" ]] || continue
+      cp -r "$t" "$dest/themes-custom/" 2>/dev/null || true
+    done
+  fi
+
+  # --- package lists (best effort) ----------------------------------------
+  pacman -Qqe 2>/dev/null | sort > "$dest/packages.explicit" || true
+  pacman -Qqm 2>/dev/null | sort > "$dest/packages.aur" || true
+
+  cat "$dest/.plugin-count"
+  rm -f "$dest/.plugin-count"
+}
+
+cmd_status() {
+  local as_json=false
+  [[ "${1:-}" == "--json" ]] && as_json=true
+  local repo last theme font count
+  repo="$(saved_repo)"
+  last=""; theme=""; font=""; count=0
+  local last_host=""
+  if [[ -f "$LAST_FILE" ]]; then
+    last="$(jq -r '.date // ""' "$LAST_FILE" 2>/dev/null || true)"
+    last_host="$(jq -r '.host // ""' "$LAST_FILE" 2>/dev/null || true)"
+  fi
+  # Prefer live checkout metadata if present.
+  if [[ -f "$CHECKOUT_DIR/backup.json" ]]; then
+    last="$(jq -r '.date // ""' "$CHECKOUT_DIR/backup.json" 2>/dev/null || echo "$last")"
+    last_host="$(jq -r '.host // ""' "$CHECKOUT_DIR/backup.json" 2>/dev/null || echo "$last_host")"
+    theme="$(jq -r '.theme // ""' "$CHECKOUT_DIR/backup.json" 2>/dev/null || true)"
+    font="$(jq -r '.font // ""' "$CHECKOUT_DIR/backup.json" 2>/dev/null || true)"
+  fi
+  if [[ -z "$theme" ]]; then theme="$(omarchy theme current 2>/dev/null || true)"; fi
+  if [[ -z "$font" ]]; then font="$(omarchy font current 2>/dev/null || true)"; fi
+  if command -v omarchy-shell >/dev/null 2>&1; then
+    count="$(omarchy-shell shell listPlugins 2>/dev/null | jq '[.[] | select(.firstParty != true)] | length' 2>/dev/null || echo 0)"
+  fi
+  if $as_json; then
+    jq -n --arg repo "$repo" --arg last "$last" --arg host "$last_host" \
+      --arg theme "$theme" --arg font "$font" --argjson count "${count:-0}" \
+      '{repo:$repo, lastBackup:$last, lastBackupHost:$host, pluginCount:$count, theme:$theme, font:$font}'
+  else
+    echo "repo:        ${repo:-"(none — run: settings-sync-ctl set-repo <github-url>)"}"
+    echo "last backup: ${last:-"(never)"} ${last_host:+on $last_host}"
+    echo "theme:       $theme"
+    echo "font:        $font"
+    echo "3rd-party plugins: $count"
+  fi
+}
+
+cmd_set_repo() {
+  local repo="${1:-}"
+  [[ -n "$repo" ]] || fail "usage: settings-sync-ctl set-repo <git-url-or-local-path>"
+  printf '%s\n' "$repo" > "$REPO_FILE"
+  info "backup repo set to $repo"
+}
+
+cmd_backup() {
+  local push=false message="" repo_override=""
+  while (( $# > 0 )); do
+    case "$1" in
+      --push) push=true; shift;;
+      --message|--msg|-m) message="${2:-}"; shift 2;;
+      --repo) repo_override="${2:-}"; shift 2;;
+      -h|--help) echo "usage: settings-sync-ctl backup [--push] [--message MSG] [--repo URL]"; return 0;;
+      *) fail "unknown backup option: $1";;
+    esac
+  done
+  local repo
+  repo="$(resolve_repo "$repo_override")" || fail "no repo set — run: settings-sync-ctl set-repo <github-url>"
+  if [[ -n "$repo_override" ]]; then printf '%s\n' "$repo" > "$REPO_FILE"; fi
+
+  ensure_checkout "$repo"
+  local dest="$CHECKOUT_DIR"
+  info "collecting config into $dest …"
+  local count
+  count="$(collect_files "$dest")"
+
+  # Write a small README so the GitHub repo explains itself.
+  cat > "$dest/README.md" <<EOF
+# Omarchy backup ($(hostname))
+
+Managed by the **settings-sync** Omarchy plugin. Do not edit by hand —
+run \`settings-sync-ctl backup --push\` on your machine instead.
+
+- Date: $(date -u +%Y-%m-%dT%H:%M:%SZ)
+- Host: $(hostname)
+- Theme: $(cat "$dest/theme.txt" 2>/dev/null)
+- Third-party plugins: $count
+
+Restore on a fresh install:
+
+\`\`\`bash
+# install the plugin, then:
+settings-sync-ctl restore --repo $repo --yes
+\`\`\`
+EOF
+
+  local msg="$message"
+  if [[ -z "$msg" ]]; then
+    msg="backup $(date -u +%Y-%m-%dT%H:%M:%SZ) from $(hostname) ($count plugins)"
+  fi
+  git -C "$dest" add -A
+  if git -C "$dest" diff --cached --quiet; then
+    info "nothing changed — already up to date ($count plugins)"
+  else
+    git -C "$dest" -c user.name="${GIT_AUTHOR_NAME:-omarchy}" -c user.email="${GIT_AUTHOR_EMAIL:-omarchy@localhost}" \
+      commit -q -m "$msg" || fail "commit failed"
+    info "committed: $msg"
+  fi
+
+  if $push; then
+    git -C "$dest" push || fail "push failed (check access: gh auth login)"
+    info "pushed to $repo"
+  else
+    if is_remote "$repo" && git -C "$dest" remote get-url origin >/dev/null 2>&1; then
+      info "committed locally. Re-run with --push to upload, or push manually in $dest"
+    fi
+  fi
+
+  jq -n --arg date "$(jq -r '.date' "$dest/backup.json")" --arg host "$(hostname)" --arg repo "$repo" \
+    '{date:$date, host:$host, repo:$repo}' > "$LAST_FILE"
+  info "backup complete ($count third-party plugins)"
+}
+
+snapshot_current() {
+  # $1 = snapshot dir. Save whatever restore is about to overwrite.
+  local snap="$1"
+  mkdir -p "$snap"
+  [[ -f "$HOME/.config/omarchy/shell.json" ]] && cp "$HOME/.config/omarchy/shell.json" "$snap/" 2>/dev/null || true
+  mkdir -p "$snap/hypr" && cp "$HOME/.config/hypr/"*.lua "$HOME/.config/hypr/"*.conf "$snap/hypr/" 2>/dev/null || true
+  mkdir -p "$snap/omarchy"
+  [[ -f "$HOME/.config/omarchy/extensions/omarchy-menu.jsonc" ]] && cp "$HOME/.config/omarchy/extensions/omarchy-menu.jsonc" "$snap/omarchy/" 2>/dev/null || true
+  [[ -f "$HOME/.config/omarchy/workspace-layout.json" ]] && cp "$HOME/.config/omarchy/workspace-layout.json" "$snap/omarchy/" 2>/dev/null || true
+  [[ -f "$HOME/.config/omarchy/shell.toml" ]] && cp "$HOME/.config/omarchy/shell.toml" "$snap/omarchy/" 2>/dev/null || true
+  info "pre-restore snapshot saved to $snap"
+}
+
+cmd_restore() {
+  local repo_override="" assume_yes=false with_packages=false skip_plugins=false skip_config=false
+  while (( $# > 0 )); do
+    case "$1" in
+      --repo) repo_override="${2:-}"; shift 2;;
+      --yes|-y) assume_yes=true; shift;;
+      --with-packages) with_packages=true; shift;;
+      --skip-plugins) skip_plugins=true; shift;;
+      --skip-config) skip_config=true; shift;;
+      -h|--help) echo "usage: settings-sync-ctl restore [--repo URL] [--yes] [--with-packages] [--skip-plugins] [--skip-config]"; return 0;;
+      *) fail "unknown restore option: $1";;
+    esac
+  done
+  local repo
+  repo="$(resolve_repo "$repo_override")" || fail "no repo set — pass --repo <github-url>"
+  if [[ -n "$repo_override" ]]; then printf '%s\n' "$repo" > "$REPO_FILE"; fi
+
+  local src=""
+  local tmp=""
+  if is_remote "$repo"; then
+    tmp="$(mktemp -d)"
+    info "cloning $repo …"
+    git clone "$repo" "$tmp" || fail "could not clone $repo"
+    src="$tmp"
+  else
+    [[ -d "$repo" ]] || fail "local repo not found: $repo"
+    src="$repo"
+  fi
+  [[ -f "$src/backup.json" ]] || fail "not a settings-sync backup (missing backup.json in $repo)"
+
+  info "backup from $(jq -r '.date // "?"' "$src/backup.json") on $(jq -r '.host // "?"' "$src/backup.json")"
+  info "theme: $(cat "$src/theme.txt" 2>/dev/null || echo ?) / plugins: $(jq 'length' "$src/plugins.json" 2>/dev/null || echo ?)"
+
+  if ! $assume_yes && interactive; then
+    if command -v gum >/dev/null 2>&1; then
+      gum confirm "Restore this backup onto $(hostname)? Current configs will be snapshotted first." || fail "aborted"
+    else
+      read -rp "Restore this backup onto $(hostname)? [y/N] " ans
+      [[ "$ans" == [yY]* ]] || fail "aborted"
+    fi
+  fi
+
+  local snap="$BACKUPS_ROOT/$(date +%Y%m%d-%H%M%S)"
+  snapshot_current "$snap"
+
+  # --- configs ----------------------------------------------------------
+  if ! $skip_config; then
+    [[ -f "$src/shell.json" ]] && cp "$src/shell.json" "$HOME/.config/omarchy/shell.json"
+    if [[ -d "$src/hypr" ]]; then
+      mkdir -p "$HOME/.config/hypr"
+      cp "$src/hypr/"*.lua "$src/hypr/"*.conf "$HOME/.config/hypr/" 2>/dev/null || true
+    fi
+    [[ -f "$src/omarchy/menu.jsonc" ]] && { mkdir -p "$HOME/.config/omarchy/extensions"; cp "$src/omarchy/menu.jsonc" "$HOME/.config/omarchy/extensions/omarchy-menu.jsonc"; }
+    [[ -f "$src/omarchy/workspace-layout.json" ]] && cp "$src/omarchy/workspace-layout.json" "$HOME/.config/omarchy/workspace-layout.json"
+    [[ -f "$src/omarchy/shell.toml" ]] && cp "$src/omarchy/shell.toml" "$HOME/.config/omarchy/shell.toml"
+    if [[ -d "$src/omarchy/hooks" ]]; then
+      mkdir -p "$HOME/.config/omarchy/hooks"
+      (cd "$src/omarchy/hooks" && find . -type f -print0 | tar --null -cf - -T - 2>/dev/null | tar -xf - -C "$HOME/.config/omarchy/hooks" 2>/dev/null) || true
+    fi
+    [[ -f "$src/terminals/alacritty.toml" ]] && { mkdir -p "$HOME/.config/alacritty"; cp "$src/terminals/alacritty.toml" "$HOME/.config/alacritty/alacritty.toml"; }
+    [[ -f "$src/terminals/kitty.conf" ]] && { mkdir -p "$HOME/.config/kitty"; cp "$src/terminals/kitty.conf" "$HOME/.config/kitty/kitty.conf"; }
+    [[ -f "$src/terminals/ghostty-config" ]] && { mkdir -p "$HOME/.config/ghostty"; cp "$src/terminals/ghostty-config" "$HOME/.config/ghostty/config"; }
+    [[ -f "$src/terminals/foot.ini" ]] && { mkdir -p "$HOME/.config/foot"; cp "$src/terminals/foot.ini" "$HOME/.config/foot/foot.ini"; }
+    [[ -f "$src/starship.toml" ]] && cp "$src/starship.toml" "$HOME/.config/starship.toml"
+    [[ -f "$src/gitconfig" ]] && { mkdir -p "$HOME/.config/git"; cp "$src/gitconfig" "$HOME/.config/git/config"; }
+    [[ -f "$src/btop/btop.conf" ]] && { mkdir -p "$HOME/.config/btop"; cp "$src/btop/btop.conf" "$HOME/.config/btop/btop.conf"; }
+    [[ -f "$src/lazygit/config.yml" ]] && { mkdir -p "$HOME/.config/lazygit"; cp "$src/lazygit/config.yml" "$HOME/.config/lazygit/config.yml"; }
+    if [[ -d "$src/themes-custom" ]]; then
+      mkdir -p "$HOME/.config/omarchy/themes"
+      for t in "$src/themes-custom/"*; do
+        [[ -e "$t" ]] || continue
+        cp -r "$t" "$HOME/.config/omarchy/themes/" 2>/dev/null || true
+      done
+    fi
+    info "configs restored"
+  fi
+
+  # --- plugins -----------------------------------------------------------
+  if ! $skip_plugins && [[ -f "$src/plugins.json" ]]; then
+    local n
+    n="$(jq 'length' "$src/plugins.json")"
+    info "reinstalling $n third-party plugin(s)…"
+    jq -c '.[]' "$src/plugins.json" | while IFS= read -r row; do
+      local id url commit enabled
+      id="$(echo "$row" | jq -r '.id')"
+      url="$(echo "$row" | jq -r '.url // ""')"
+      commit="$(echo "$row" | jq -r '.commit // ""')"
+      enabled="$(echo "$row" | jq -r '.enabled')"
+      if [[ -z "$id" ]]; then continue; fi
+      if [[ -d "$HOME/.config/omarchy/plugins/$id" ]]; then
+        info "  $id already installed — skipping clone"
+      else
+        if [[ -z "$url" || "$url" == "null" ]]; then
+          info "  $id has no git URL recorded — skipping (was probably a manual clone)"
+          continue
+        fi
+        info "  adding $id from $url …"
+        export GIT_TERMINAL_PROMPT=0
+        if [[ "$enabled" == "true" ]]; then
+          run_timeout 120 omarchy plugin add "$url" --enable --yes 2>&1 || info "  WARNING: failed to add $id"
+        else
+          run_timeout 120 omarchy plugin add "$url" --yes 2>&1 || info "  WARNING: failed to add $id"
+        fi
+      fi
+      # Pin to backed-up commit when we know it (best effort, never fatal).
+      if [[ -n "$commit" && "$commit" != "null" && -d "$HOME/.config/omarchy/plugins/$id/.git" ]]; then
+        run_timeout 30 git -C "$HOME/.config/omarchy/plugins/$id" fetch -q 2>/dev/null || true
+        run_timeout 30 git -C "$HOME/.config/omarchy/plugins/$id" checkout -q "$commit" 2>/dev/null \
+          && info "  $id pinned to $commit" || info "  $id kept at latest (could not check out $commit)"
+      fi
+      # Re-apply enabled state.
+      if [[ "$enabled" == "true" ]]; then
+        run_timeout 30 omarchy plugin enable "$id" 2>/dev/null || true
+      else
+        run_timeout 30 omarchy plugin disable "$id" 2>/dev/null || true
+      fi
+    done
+  fi
+
+  # --- theme + font (best effort, never fatal) ------------------------------
+  if ! $skip_config; then
+    local theme font
+    theme="$(cat "$src/theme.txt" 2>/dev/null || true)"
+    font="$(cat "$src/font.txt" 2>/dev/null || true)"
+    if [[ -n "$theme" && "$theme" != "unknown" ]]; then
+      run_timeout 60 omarchy theme set "$theme" 2>&1 || info "WARNING: could not set theme '$theme' (maybe a custom theme not yet restored?)"
+    fi
+    if [[ -n "$font" && "$font" != "unknown" ]]; then
+      run_timeout 60 omarchy font set "$font" 2>&1 || info "WARNING: could not set font '$font'"
+    fi
+  fi
+
+  # --- packages (opt-in only) -------------------------------------------------
+  if $with_packages; then
+    if [[ -f "$src/packages.explicit" ]]; then
+      info "installing explicit packages (this can take a while)…"
+      # Only install what's missing.
+      local missing
+      missing="$(comm -23 <(sort "$src/packages.explicit") <(pacman -Qqe 2>/dev/null | sort) || true)"
+      if [[ -n "$missing" ]]; then
+        # shellcheck disable=SC2086
+        omarchy pkg add $missing || info "WARNING: some packages failed to install"
+      else
+        info "all explicit packages already present"
+      fi
+    fi
+  else
+    info "skipping packages (pass --with-packages to install from packages.explicit)"
+  fi
+
+  # --- reload (best effort, bounded so the widget can't hang) ---------------
+  run_timeout 30 omarchy-shell shell rescanPlugins >/dev/null 2>&1 || true
+  run_timeout 30 omarchy restart shell >/dev/null 2>&1 || true
+  run_timeout 15 hyprctl reload >/dev/null 2>&1 || true
+
+  [[ -n "$tmp" ]] && rm -rf "$tmp"
+  info "restore complete. Pre-restore snapshot: $snap"
+}
+
+cmd_list_plugins() {
+  if command -v omarchy-shell >/dev/null 2>&1; then
+    omarchy-shell shell listPlugins 2>/dev/null | jq -r '.[] | select(.firstParty != true) | "\(.id)\t\(.enabled)\t\(.name // "")"'
+  else
+    for d in "$HOME/.config/omarchy/plugins/"*/; do basename "$d"; done
+  fi
+}
+
+cmd_init() {
+  local repo="${1:-}"
+  [[ -n "$repo" ]] || fail "usage: settings-sync-ctl init <github-repo-url>  (e.g. git@github.com:you/omarchy-backup.git)"
+  printf '%s\n' "$repo" > "$REPO_FILE"
+  if command -v gh >/dev/null 2>&1 && [[ "$repo" == *"github.com"* ]]; then
+    info "hint: create the GitHub repo first with: gh repo create omarchy-backup --private --source=/tmp/empty  (or just push — GitHub accepts first push to a new repo name via gh)"
+  fi
+  cmd_backup --push
+}
+
+case "${1:-help}" in
+  status) shift; cmd_status "$@";;
+  set-repo|set) shift; cmd_set_repo "$@";;
+  get-repo|get) saved_repo;;
+  backup) shift; cmd_backup "$@";;
+  restore) shift; cmd_restore "$@";;
+  list-plugins|plugins) cmd_list_plugins;;
+  init) shift; cmd_init "$@";;
+  -h|--help|help)
+    sed -n '2,20p' "$0";;
+  *)
+    echo "unknown command: $1 (try: status, backup, restore, set-repo, init)" >&2; exit 1;;
+esac

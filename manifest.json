@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "id": "settings-sync",
+  "name": "Settings Sync",
+  "version": "1.0.0",
+  "author": "you",
+  "license": "MIT",
+  "description": "Back up Omarchy plugins, bar layout, theme, Hyprland and terminal configs to a GitHub repo, then restore them on a fresh install.",
+  "kinds": ["bar-widget"],
+  "entryPoints": {
+    "barWidget": "Widget.qml"
+  },
+  "barWidget": {
+    "displayName": "Settings Sync",
+    "description": "Back up and restore Omarchy setup via GitHub",
+    "category": "System",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}
