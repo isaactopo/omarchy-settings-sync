@@ -92,10 +92,22 @@ Panel {
 
   function messageColor() {
     if (root.messageKind === "error") return Color.urgent
-    if (root.messageKind === "ok") return Color.accent
+    if (root.messageKind === "ok") return root.successGreen()
     if (root.messageKind === "working") return root.bar.foreground
     return Qt.darker(root.bar.foreground, 1.4)
   }
+
+  // The asked-for green, picked for contrast against the bar background so
+  // the success state stays readable on light and dark themes alike.
+  function successGreen() {
+    var bg = root.bar ? root.bar.background : "#000000"
+    var lum = 0.299 * bg.r + 0.587 * bg.g + 0.114 * bg.b
+    return lum > 0.6 ? "#1e7e34" : "#7bd88a"
+  }
+
+  readonly property string busyLabel: backupProc.running
+    ? "Backing up…"
+    : (restoreProc.running ? "Restoring…" : "")
 
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
@@ -369,15 +381,81 @@ Panel {
           }
         }
 
-        // --- feedback ----------------------------------------------------------
-        Text {
+        // --- status ------------------------------------------------------------
+        // One status slot with three faces: an animated progress bar while
+        // working, a green smiley row on success, plain text otherwise.
+        Column {
           width: parent.width
-          visible: root.lastMessage !== "" && root.syncState.hasRepo
-          text: root.lastMessage
-          color: root.messageColor()
-          font.family: root.bar.fontFamily
-          font.pixelSize: Style.font.caption
-          wrapMode: Text.WordWrap
+          spacing: Style.spacing.sm
+          visible: root.syncState.hasRepo && (root.busy || root.lastMessage !== "")
+
+          Column {
+            width: parent.width
+            spacing: Style.spacing.sm
+            visible: root.busy
+
+            Text {
+              width: parent.width
+              text: root.busyLabel
+              color: root.bar.foreground
+              font.family: root.bar.fontFamily
+              font.pixelSize: Style.font.caption
+              wrapMode: Text.WordWrap
+            }
+
+            Item {
+              id: progressTrack
+              width: parent.width
+              height: Math.max(3, Style.space(4))
+
+              Rectangle {
+                anchors.fill: parent
+                radius: height / 2
+                color: Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.15)
+              }
+
+              Rectangle {
+                id: progressSeg
+                width: Math.max(0, progressTrack.width * 0.35)
+                height: progressTrack.height
+                radius: height / 2
+                color: Color.accent
+                x: -width
+
+                NumberAnimation on x {
+                  from: -progressSeg.width
+                  to: progressTrack.width
+                  duration: 1100
+                  loops: Animation.Infinite
+                  running: progressTrack.visible && root.opened
+                  easing.type: Easing.InOutSine
+                }
+              }
+            }
+          }
+
+          Row {
+            width: parent.width
+            spacing: Style.spacing.sm
+            visible: !root.busy && root.lastMessage !== ""
+
+            SmileyIcon {
+              width: Style.space(16)
+              height: Style.space(16)
+              anchors.verticalCenter: parent.verticalCenter
+              visible: root.messageKind === "ok"
+              color: root.successGreen()
+            }
+
+            Text {
+              width: parent.width - (root.messageKind === "ok" ? Style.space(16) + parent.spacing : 0)
+              text: root.lastMessage
+              color: root.messageColor()
+              font.family: root.bar.fontFamily
+              font.pixelSize: Style.font.caption
+              wrapMode: Text.WordWrap
+            }
+          }
         }
       }
     }
