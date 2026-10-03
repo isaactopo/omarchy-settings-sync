@@ -288,7 +288,18 @@ cmd_backup() {
   local count
   count="$(collect_files "$dest")"
 
-  # Write a small README so the GitHub repo explains itself.
+  # Write a small README so the GitHub repo explains itself,
+  # including the backed-up plugin list as a markdown table.
+  local plugins_table
+  if (( count > 0 )); then
+    plugins_table="$(jq -r '.[] | (.url // "") as $u | (.commit // "") as $c
+      | (if $u == "" then "(no URL recorded)"
+         else $u + (if $c == "" then "" else " @ " + $c[0:8] end) end) as $src
+      | "| `\(.id)` | \(if .enabled then "enabled" else "disabled" end) | \($src) |"' \
+      "$dest/plugins.json")"
+  else
+    plugins_table="(none)"
+  fi
   cat > "$dest/README.md" <<EOF
 # Omarchy backup ($(hostname))
 
@@ -299,6 +310,12 @@ run \`settings-sync-ctl backup --push\` on your machine instead.
 - Host: $(hostname)
 - Theme: $(cat "$dest/theme.txt" 2>/dev/null)
 - Third-party plugins: $count
+
+## Plugins ($count)
+
+| Plugin | State | Source |
+|---|---|---|
+$plugins_table
 
 Restore on a fresh install:
 
