@@ -21,6 +21,9 @@ calling `settings-sync-ctl`, so terminal and UI never drift.
 
 ## Fresh install recovery
 
+> GitHub login is required to reach a private backup repo — run
+> `gh auth login` first, then the steps below.
+
 ```bash
 # 1. Install this plugin (pick one):
 omarchy plugin add https://github.com/isaactopo/omarchy-settings-sync.git --enable --yes

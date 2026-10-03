@@ -166,6 +166,22 @@ Panel {
           }
         }
 
+        // --- auth warning ----------------------------------------------------
+        // GitHub remotes cannot be created or pushed without `gh auth login`.
+        // Local-path repos need no login, so the banner stays quiet for them.
+        Text {
+          width: parent.width
+          visible: !root.syncState.ghAuth
+            && (!root.syncState.hasRepo || Model.repoIsRemote(root.syncState.repo))
+          textFormat: Text.PlainText
+          text: "GitHub login required — run gh auth login in a terminal to create the private repo and save your Omarchy settings."
+          color: Color.urgent
+          font.family: root.bar.fontFamily
+          font.pixelSize: Style.font.caption
+          font.bold: true
+          wrapMode: Text.WordWrap
+        }
+
         // --- empty state: no repo yet ----------------------------------
         Column {
           width: parent.width
@@ -295,20 +311,21 @@ Panel {
           // Items never accept mouse input, so clicks fall through to the
           // Button's own MouseArea. The Button's text stays empty so its
           // internal row collapses and the overlay is the only content.
-          Button {
-            id: backupBtn
-            width: parent.width
-            // The Button sizes itself from its (empty) internal row, so pin
-            // the height to the kit's own formula driven by the real overlay
-            // content: content + vertical padding + reserved borders.
-            height: stateRow.implicitHeight + verticalPadding * 2
-              + _reservedBorderTop + _reservedBorderBottom
-            text: ""
-            selected: true
-            enabled: !root.busy
-            foreground: root.bar.foreground
-            fontFamily: root.bar.fontFamily
-            onClicked: root.runBackup()
+            Button {
+              id: backupBtn
+              width: parent.width
+              // The Button sizes itself from its (empty) internal row, so pin
+              // the height to the kit's own formula driven by the real overlay
+              // content: content + vertical padding + reserved borders.
+              height: stateRow.implicitHeight + verticalPadding * 2
+                + _reservedBorderTop + _reservedBorderBottom
+              text: ""
+              selected: true
+              enabled: !root.busy && (root.syncState.ghAuth || !Model.repoIsRemote(root.syncState.repo))
+              tooltipText: backupBtn.enabled ? "" : "Log in first: gh auth login"
+              foreground: root.bar.foreground
+              fontFamily: root.bar.fontFamily
+              onClicked: root.runBackup()
 
             readonly property color labelColor: Style.selectedStateColor(foreground, accent)
             readonly property string stateLabel: backupProc.running ? "Backing up…"

@@ -10,7 +10,8 @@ function defaultStatus() {
     theme: "",
     font: "",
     hasRepo: false,
-    hasBackup: false
+    hasBackup: false,
+    ghAuth: true
   };
 }
 
@@ -68,6 +69,11 @@ function glyphFor(state) {
   return "󰚒";                            // cloud check
 }
 
+function repoIsRemote(repo) {
+  if (!repo) return false;
+  return repo.indexOf("://") !== -1 || repo.indexOf("git@") === 0;
+}
+
 // Node exports for quick testing: `node -e "const M=require('./Model.js')..."`
 try {
   if (typeof module !== "undefined" && module.exports) {
@@ -77,7 +83,8 @@ try {
       shortRepo: shortRepo,
       statusLine: statusLine,
       tooltipText: tooltipText,
-      glyphFor: glyphFor
+      glyphFor: glyphFor,
+      repoIsRemote: repoIsRemote
     };
   }
 } catch (e) { /* QML has no module — ignore */ }

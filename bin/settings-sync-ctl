@@ -229,6 +229,8 @@ cmd_status() {
   [[ "${1:-}" == "--json" ]] && as_json=true
   local repo last theme font count
   repo="$(saved_repo)"
+  local gh_auth="false"
+  gh auth status >/dev/null 2>&1 && gh_auth="true"
   last=""; theme=""; font=""; count=0
   local last_host=""
   if [[ -f "$LAST_FILE" ]]; then
@@ -250,13 +252,19 @@ cmd_status() {
   if $as_json; then
     jq -n --arg repo "$repo" --arg last "$last" --arg host "$last_host" \
       --arg theme "$theme" --arg font "$font" --argjson count "${count:-0}" \
-      '{repo:$repo, lastBackup:$last, lastBackupHost:$host, pluginCount:$count, theme:$theme, font:$font}'
+      --argjson ghAuth "$gh_auth" \
+      '{repo:$repo, lastBackup:$last, lastBackupHost:$host, pluginCount:$count, theme:$theme, font:$font, ghAuth:$ghAuth}'
   else
     echo "repo:        ${repo:-"(none — run: settings-sync-ctl set-repo <github-url>)"}"
     echo "last backup: ${last:-"(never)"} ${last_host:+on $last_host}"
     echo "theme:       $theme"
     echo "font:        $font"
     echo "3rd-party plugins: $count"
+    if [[ "$gh_auth" == "true" ]]; then
+      echo "github auth: logged in ($(gh api user --jq .login 2>/dev/null || echo ok))"
+    else
+      echo "github auth: NOT LOGGED IN — run: gh auth login"
+    fi
   fi
 }
 
@@ -281,6 +289,12 @@ cmd_backup() {
   local repo
   repo="$(resolve_repo "$repo_override")" || fail "no repo set — run: settings-sync-ctl set-repo <github-url>"
   if [[ -n "$repo_override" ]]; then printf '%s\n' "$repo" > "$REPO_FILE"; fi
+
+  # GitHub remotes need an authenticated `gh` — fail fast with the fix
+  # instead of collecting everything and dying on push.
+  if [[ "$repo" == *"github.com"* ]] && ! gh auth status >/dev/null 2>&1; then
+    fail "GitHub login required — run: gh auth login (needed to create the private repo and save your Omarchy settings)"
+  fi
 
   ensure_checkout "$repo"
   local dest="$CHECKOUT_DIR"
