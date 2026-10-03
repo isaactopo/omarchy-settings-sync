@@ -28,6 +28,7 @@ Panel {
   property string repoDraft: ""
   property string lastMessage: ""
   property string messageKind: "info" // info | working | ok | error
+  property string lastOp: "" // backup | restore — which action produced the current status
   property bool showRepoEditor: false
 
   // The exact line a fresh machine needs; copied to the clipboard on demand.
@@ -50,16 +51,18 @@ Panel {
 
   function runBackup() {
     if (root.busy) return
+    root.lastOp = "backup"
     root.messageKind = "working"
-    root.lastMessage = "Backing up…"
+    root.lastMessage = ""
     backupProc.command = [root.ctl, "backup", "--push"]
     backupProc.running = true
   }
 
   function runRestore() {
     if (root.busy) return
+    root.lastOp = "restore"
     root.messageKind = "working"
-    root.lastMessage = "Restoring… current setup is snapshotted first"
+    root.lastMessage = ""
     restoreProc.command = [root.ctl, "restore", "--yes"]
     restoreProc.running = true
   }
@@ -78,14 +81,17 @@ Panel {
     root.lastMessage = "Restore command copied to clipboard"
   }
 
-  function finishRun(proc, errText, okText) {
-    if (proc.exitCode === 0) {
+  // The exit code arrives as an onExited signal argument (kit convention) —
+  // there is no exitCode property to read afterwards.
+  function finishRun(op, exitCode, exitStatus, errText, okText) {
+    root.lastOp = op
+    if (exitCode === 0 && exitStatus === 0) {
       root.messageKind = "ok"
       root.lastMessage = okText
     } else {
       root.messageKind = "error"
       var detail = (errText || "").trim().split("\n").slice(-2).join(" ")
-      root.lastMessage = detail !== "" ? detail : "Failed with exit code " + proc.exitCode
+      root.lastMessage = detail !== "" ? detail : "Failed with exit code " + exitCode
     }
     root.refresh()
   }
@@ -104,10 +110,6 @@ Panel {
     var lum = 0.299 * bg.r + 0.587 * bg.g + 0.114 * bg.b
     return lum > 0.6 ? "#1e7e34" : "#7bd88a"
   }
-
-  readonly property string busyLabel: backupProc.running
-    ? "Backing up…"
-    : (restoreProc.running ? "Restoring…" : "")
 
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
@@ -292,14 +294,42 @@ Panel {
             wrapMode: Text.WordWrap
           }
 
-          Button {
+          // The backup action carries its own state: a spinner slot beside
+          // the button while working, the green smiley once done.
+          Row {
             width: parent.width
-            text: backupProc.running ? "Backing up…" : "Back up now"
-            selected: true
-            enabled: !root.busy
-            foreground: root.bar.foreground
-            fontFamily: root.bar.fontFamily
-            onClicked: root.runBackup()
+            spacing: Style.spacing.sm
+
+            Item {
+              id: backupStateIcon
+              width: Style.space(16)
+              height: Style.space(16)
+              anchors.verticalCenter: parent.verticalCenter
+
+              SpinnerIcon {
+                anchors.fill: parent
+                visible: backupProc.running
+                spinning: root.opened
+                color: root.bar.foreground
+              }
+
+              SmileyIcon {
+                anchors.fill: parent
+                visible: !backupProc.running && root.lastOp === "backup" && root.messageKind === "ok"
+                color: root.successGreen()
+              }
+            }
+
+            Button {
+              width: parent.width - backupStateIcon.width - parent.spacing
+              text: backupProc.running ? "Backing up…"
+                : (root.lastOp === "backup" && root.messageKind === "ok" ? "Back up again" : "Back up now")
+              selected: true
+              enabled: !root.busy
+              foreground: root.bar.foreground
+              fontFamily: root.bar.fontFamily
+              onClicked: root.runBackup()
+            }
           }
         }
 
@@ -382,79 +412,30 @@ Panel {
         }
 
         // --- status ------------------------------------------------------------
-        // One status slot with three faces: an animated progress bar while
-        // working, a green smiley row on success, plain text otherwise.
-        Column {
+        // Backup carries its state in its own row (spinner while working,
+        // green smiley once done). This line is for everything else: errors
+        // in urgent red, restore results, and confirmations.
+        Row {
           width: parent.width
           spacing: Style.spacing.sm
-          visible: root.syncState.hasRepo && (root.busy || root.lastMessage !== "")
+          visible: root.syncState.hasRepo && root.lastMessage !== ""
+            && !(root.messageKind === "ok" && root.lastOp === "backup")
 
-          Column {
-            width: parent.width
-            spacing: Style.spacing.sm
-            visible: root.busy
-
-            Text {
-              width: parent.width
-              text: root.busyLabel
-              color: root.bar.foreground
-              font.family: root.bar.fontFamily
-              font.pixelSize: Style.font.caption
-              wrapMode: Text.WordWrap
-            }
-
-            Item {
-              id: progressTrack
-              width: parent.width
-              height: Math.max(3, Style.space(4))
-
-              Rectangle {
-                anchors.fill: parent
-                radius: height / 2
-                color: Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.15)
-              }
-
-              Rectangle {
-                id: progressSeg
-                width: Math.max(0, progressTrack.width * 0.35)
-                height: progressTrack.height
-                radius: height / 2
-                color: Color.accent
-                x: -width
-
-                NumberAnimation on x {
-                  from: -progressSeg.width
-                  to: progressTrack.width
-                  duration: 1100
-                  loops: Animation.Infinite
-                  running: progressTrack.visible && root.opened
-                  easing.type: Easing.InOutSine
-                }
-              }
-            }
+          SmileyIcon {
+            width: Style.space(16)
+            height: Style.space(16)
+            anchors.verticalCenter: parent.verticalCenter
+            visible: root.messageKind === "ok"
+            color: root.successGreen()
           }
 
-          Row {
-            width: parent.width
-            spacing: Style.spacing.sm
-            visible: !root.busy && root.lastMessage !== ""
-
-            SmileyIcon {
-              width: Style.space(16)
-              height: Style.space(16)
-              anchors.verticalCenter: parent.verticalCenter
-              visible: root.messageKind === "ok"
-              color: root.successGreen()
-            }
-
-            Text {
-              width: parent.width - (root.messageKind === "ok" ? Style.space(16) + parent.spacing : 0)
-              text: root.lastMessage
-              color: root.messageColor()
-              font.family: root.bar.fontFamily
-              font.pixelSize: Style.font.caption
-              wrapMode: Text.WordWrap
-            }
+          Text {
+            width: parent.width - (root.messageKind === "ok" ? Style.space(16) + parent.spacing : 0)
+            text: root.lastMessage
+            color: root.messageColor()
+            font.family: root.bar.fontFamily
+            font.pixelSize: Style.font.caption
+            wrapMode: Text.WordWrap
           }
         }
       }
@@ -488,9 +469,8 @@ Panel {
       waitForEnd: true
       onStreamFinished: backupProc.err = text
     }
-    onRunningChanged: {
-      if (running) return
-      root.finishRun(backupProc, backupProc.err, "Backup complete and pushed.")
+    onExited: function(exitCode, exitStatus) {
+      root.finishRun("backup", exitCode, exitStatus, backupProc.err, "Backup complete and pushed.")
     }
   }
 
@@ -502,9 +482,8 @@ Panel {
       waitForEnd: true
       onStreamFinished: restoreProc.err = text
     }
-    onRunningChanged: {
-      if (running) return
-      root.finishRun(restoreProc, restoreProc.err, "Restore complete.")
+    onExited: function(exitCode, exitStatus) {
+      root.finishRun("restore", exitCode, exitStatus, restoreProc.err, "Restore complete.")
     }
   }
 
