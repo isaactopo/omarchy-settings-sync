@@ -43,6 +43,30 @@ third-party plugins via `omarchy plugin add <url> --enable`, re-applies
 enabled/disabled states, pins plugins to the backed-up commit when possible,
 sets theme/font, then rescans plugins and reloads the shell + Hyprland.
 
+## Storage backends
+
+GitHub is the default, but any of these hold the backup. Pick in the panel
+picker or with `settings-sync-ctl init <backend> <target>`:
+
+| Backend | Target example | Needs |
+|---|---|---|
+| `github` | `https://github.com/you/omarchy-backup.git` | `gh auth login` |
+| `git` (GitLab, Bitbucket, Codeberg, self-hosted…) | `git@gitlab.com:you/omarchy-backup.git` | your existing SSH key / credential setup |
+| `local` (folder, USB stick) | `/run/media/you/STICK/omarchy-backup` | nothing — commits only, no push |
+| `dropbox` | `~/Dropbox/omarchy-backup` | `omarchy install service dropbox` + tray login (the daemon syncs; no push) |
+| `rclone` (Google Drive, OneDrive, Nextcloud, S3…) | `gdrive:omarchy-backup` | `rclone config` once (OAuth, like `gh auth login`) |
+
+```bash
+settings-sync-ctl init git git@gitlab.com:you/omarchy-backup.git
+settings-sync-ctl init local /run/media/you/STICK/omarchy-backup
+settings-sync-ctl init dropbox            # uses ~/Dropbox/omarchy-backup
+settings-sync-ctl init rclone gdrive:omarchy-backup
+settings-sync-ctl status                  # shows backend + availability
+```
+
+The plugin itself stays on GitHub (public) — `omarchy plugin add` needs a
+git URL. Only the backup location varies.
+
 Useful flags:
 
 ```bash
@@ -71,6 +95,8 @@ settings-sync-ctl list-plugins
 
 ## Notes
 
+- Backups include `gitconfig` and possibly tokens — prefer private targets.
+  (Per-file encryption via `git-crypt`/`age` is a possible follow-up.)
 - Backup commits locally; only `--push` uploads (the widget's button pushes).
 - Plugin restores never overwrite an already-installed plugin directory —
   delete `~/.config/omarchy/plugins/<id>` first if you want a clean re-clone.

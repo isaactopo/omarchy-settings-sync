@@ -50,7 +50,7 @@ Panel {
   }
 
   function runBackup() {
-    if (root.busy) return
+    if (root.busy || !Model.canBackup(root.syncState)) return
     root.lastOp = "backup"
     root.messageKind = "working"
     root.lastMessage = ""
@@ -74,6 +74,12 @@ Panel {
     if (setRepoProc.running || root.repoDraft === "") return
     setRepoProc.command = [root.ctl, "set-repo", root.repoDraft]
     setRepoProc.running = true
+  }
+
+  function saveBackend(value) {
+    if (setBackendProc.running || value === root.syncState.backend) return
+    setBackendProc.command = [root.ctl, "set-backend", value]
+    setBackendProc.running = true
   }
 
   // The exit code arrives as an onExited signal argument (kit convention) —
@@ -166,13 +172,25 @@ Panel {
           }
         }
 
-        // --- auth warning ----------------------------------------------------
-        // GitHub remotes cannot be created or pushed without `gh auth login`.
-        // Local-path repos need no login, so the banner stays quiet for them.
+        // --- storage warnings ------------------------------------------------
+        // A backend that is not set up (Dropbox missing, rclone remote
+        // unknown…) blocks everything: name the backend and its fix.
         Text {
           width: parent.width
-          visible: !root.syncState.ghAuth
-            && (!root.syncState.hasRepo || Model.repoIsRemote(root.syncState.repo))
+          visible: root.syncState.hasRepo && !root.syncState.backendAvailable
+          textFormat: Text.PlainText
+          text: "Storage not ready (" + Model.backendLabel(root.syncState.backend) + "): " + root.syncState.backendHint
+          color: Color.urgent
+          font.family: root.bar.fontFamily
+          font.pixelSize: Style.font.caption
+          font.bold: true
+          wrapMode: Text.WordWrap
+        }
+
+        // GitHub remotes cannot be created or pushed without `gh auth login`.
+        Text {
+          width: parent.width
+          visible: !root.syncState.ghAuth && (!root.syncState.hasRepo || root.syncState.backend === "github")
           textFormat: Text.PlainText
           text: "GitHub login required — run gh auth login in a terminal to create the private repo and save your Omarchy settings."
           color: Color.urgent
@@ -200,7 +218,7 @@ Panel {
           TextField {
             width: parent.width
             text: root.repoDraft
-            placeholderText: "git@github.com:you/omarchy-backup.git"
+            placeholderText: Model.placeholderFor("github")
             font.family: root.bar.fontFamily
             onTextChanged: root.repoDraft = text
             onAccepted: root.saveRepo()
@@ -227,6 +245,22 @@ Panel {
             text: "Backup"
             foreground: root.bar.foreground
             fontFamily: root.bar.fontFamily
+          }
+
+          Dropdown {
+            width: parent.width
+            label: "Storage"
+            fontFamily: root.bar.fontFamily
+            foreground: root.bar.foreground
+            options: [
+              { label: "GitHub", value: "github" },
+              { label: "Other git host", value: "git" },
+              { label: "Local folder", value: "local" },
+              { label: "Dropbox folder", value: "dropbox" },
+              { label: "Cloud (rclone)", value: "rclone" }
+            ]
+            value: root.syncState.backend
+            onChanged: function(v) { root.saveBackend(v) }
           }
 
           Row {
@@ -264,6 +298,7 @@ Panel {
             TextField {
               width: parent.width
               text: root.repoDraft
+              placeholderText: Model.placeholderFor(root.syncState.backend)
               font.family: root.bar.fontFamily
               onTextChanged: root.repoDraft = text
               onAccepted: root.saveRepo()
@@ -321,8 +356,13 @@ Panel {
                 + _reservedBorderTop + _reservedBorderBottom
               text: ""
               selected: true
-              enabled: !root.busy && (root.syncState.ghAuth || !Model.repoIsRemote(root.syncState.repo))
-              tooltipText: backupBtn.enabled ? "" : "Log in first: gh auth login"
+              enabled: !root.busy && Model.canBackup(root.syncState)
+              tooltipText: {
+                if (root.syncState.backendAvailable
+                  && (root.syncState.backend !== "github" || root.syncState.ghAuth)) return ""
+                if (!root.syncState.backendAvailable) return "Storage not ready: " + root.syncState.backendHint
+                return "Log in first: gh auth login"
+              }
               foreground: root.bar.foreground
               fontFamily: root.bar.fontFamily
               onClicked: root.runBackup()
@@ -557,6 +597,17 @@ Panel {
     onRunningChanged: {
       if (running) return
       root.showRepoEditor = false
+      root.refresh()
+    }
+  }
+
+  Process {
+    id: setBackendProc
+    onRunningChanged: {
+      if (running) return
+      // A new backend usually wants a new target: open the editor with a
+      // fitting example once the fresh status arrives.
+      root.showRepoEditor = true
       root.refresh()
     }
   }

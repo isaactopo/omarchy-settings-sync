@@ -1,14 +1,18 @@
 #!/bin/bash
-# settings-sync-ctl — backup & restore Omarchy setup to a git repo (GitHub).
+# settings-sync-ctl — backup & restore Omarchy setup to a storage backend.
 #
 # Usage:
 #   settings-sync-ctl status [--json]
-#   settings-sync-ctl set-repo <git-url-or-local-path>
+#   settings-sync-ctl set-repo <git-url-or-local-path|rclone-remote:path>
+#   settings-sync-ctl set-backend <github|git|local|dropbox|rclone>
 #   settings-sync-ctl get-repo
-#   settings-sync-ctl backup [--push] [--message MSG] [--repo URL]
-#   settings-sync-ctl restore [--repo URL] [--yes] [--with-packages] [--skip-plugins] [--skip-config]
+#   settings-sync-ctl backup [--push] [--message MSG] [--repo URL] [--backend NAME]
+#   settings-sync-ctl restore [--repo URL] [--backend NAME] [--yes] [--with-packages] [--skip-plugins] [--skip-config]
 #   settings-sync-ctl list-plugins
-#   settings-sync-ctl init <github-repo-url>
+#   settings-sync-ctl init [backend] <target>
+#     init github <git-url> | init git <git-url> | init local <path>
+#     init dropbox [path]    | init rclone <remote:path>
+#     init <github-url>      (legacy shorthand)
 #
 # The backup repo layout:
 #   backup.json            metadata (date, host, theme, font, omarchy version)
@@ -33,9 +37,12 @@ set -uo pipefail
 
 CONFIG_DIR="$HOME/.config/omarchy/settings-sync"
 REPO_FILE="$CONFIG_DIR/repo"
+BACKEND_FILE="$CONFIG_DIR/backend"
 LAST_FILE="$CONFIG_DIR/last-backup.json"
 CHECKOUT_DIR="$HOME/.local/share/omarchy-settings-sync/backup"
 BACKUPS_ROOT="$CONFIG_DIR/backups"
+
+VALID_BACKENDS="github git local dropbox rclone"
 
 mkdir -p "$CONFIG_DIR"
 
@@ -68,6 +75,68 @@ resolve_repo() {
 
 is_remote() { [[ "$1" == *"://"* || "$1" == git@* ]]; }
 
+valid_backend() {
+  case "$1" in github|git|local|dropbox|rclone) return 0;; *) return 1;; esac
+}
+
+saved_backend() {
+  if [[ -f "$BACKEND_FILE" ]]; then
+    cat "$BACKEND_FILE"
+  fi
+}
+
+infer_backend() {
+  # $1 = repo. Best guess when no backend was stored (backwards compatible).
+  local repo="${1:-}"
+  if [[ "$repo" == *"github.com"* ]]; then echo github
+  elif is_remote "$repo"; then echo git
+  elif [[ "$repo" == *":"* ]]; then echo rclone
+  else echo local
+  fi
+}
+
+resolve_backend() {
+  # $1 = override (may be empty), $2 = repo. Echoes effective backend.
+  local override="${1:-}" repo="${2:-}"
+  if [[ -n "$override" ]]; then
+    valid_backend "$override" || fail "unknown backend '$override' (pick: $VALID_BACKENDS)"
+    printf '%s\n' "$override"
+    return 0
+  fi
+  local saved
+  saved="$(saved_backend)"
+  if [[ -n "$saved" ]]; then
+    printf '%s\n' "$saved"
+    return 0
+  fi
+  infer_backend "$repo"
+}
+
+# The rclone remote name in a `name:path` target.
+rclone_name() { printf '%s\n' "${1%%:*}"; }
+
+# Echoes a one-line setup hint when the backend is NOT ready, else nothing.
+backend_hint() {
+  # $1 = backend, $2 = repo.
+  local backend="$1" repo="$2"
+  case "$backend" in
+    github)
+      gh auth status >/dev/null 2>&1 || echo "run: gh auth login"
+      ;;
+    dropbox)
+      [[ -d "$HOME/Dropbox" ]] || echo "run: omarchy install service dropbox, then finish setup from the tray icon"
+      ;;
+    rclone)
+      command -v rclone >/dev/null 2>&1 || { echo "install rclone first: omarchy pkg add rclone"; return; }
+      local name
+      name="$(rclone_name "$repo")"
+      rclone listremotes 2>/dev/null | grep -qx "${name}:" || echo "run: rclone config (add a '$name' remote)"
+      ;;
+  esac
+}
+
+backend_ready() { [[ -z "$(backend_hint "$1" "$2")" ]]; }
+
 # Wrapper so QML-triggered runs can never hang the shell: every network or
 # service-touching step gets a timeout (coreutils `timeout` is stock on Arch).
 run_timeout() {
@@ -80,34 +149,60 @@ run_timeout() {
 }
 
 ensure_checkout() {
-  # $1 = repo. Prepares $CHECKOUT_DIR as a checkout of it.
-  local repo="$1"
-  if is_remote "$repo"; then
-    if [[ -d "$CHECKOUT_DIR/.git" ]]; then
-      local current
-      current="$(git -C "$CHECKOUT_DIR" remote get-url origin 2>/dev/null || true)"
-      if [[ "$current" != "$repo" ]]; then
-        info "checkout points at $current, re-cloning for $repo"
-        rm -rf "$CHECKOUT_DIR"
-        git clone "$repo" "$CHECKOUT_DIR" || fail "could not clone $repo (need access? try: gh auth login)"
+  # $1 = repo, $2 = backend. Prepares $CHECKOUT_DIR (or points it at a
+  # local dir) so collect_files can write into it.
+  local repo="$1" backend="$2"
+  case "$backend" in
+    rclone)
+      command -v rclone >/dev/null 2>&1 || fail "rclone is not installed (run: omarchy pkg add rclone)"
+      mkdir -p "$CHECKOUT_DIR"
+      # Pull whatever is already upstream; an empty/missing remote is fine.
+      run_timeout 120 rclone copy "$repo" "$CHECKOUT_DIR" 2>/dev/null \
+        || info "no upstream content yet (starting fresh)"
+      ;;
+    github|git)
+      if [[ -d "$CHECKOUT_DIR/.git" ]]; then
+        local current
+        current="$(git -C "$CHECKOUT_DIR" remote get-url origin 2>/dev/null || true)"
+        if [[ "$current" != "$repo" ]]; then
+          info "checkout points at $current, re-cloning for $repo"
+          rm -rf "$CHECKOUT_DIR"
+          git clone "$repo" "$CHECKOUT_DIR" || fail "could not clone $repo (need access? try: gh auth login)"
+        else
+          run_timeout 60 git -C "$CHECKOUT_DIR" pull --rebase --autostash 2>/dev/null || info "could not pull latest (offline? continuing)"
+        fi
       else
-        run_timeout 60 git -C "$CHECKOUT_DIR" pull --rebase --autostash 2>/dev/null || info "could not pull latest (offline? continuing)"
+        mkdir -p "$(dirname "$CHECKOUT_DIR")"
+        rm -rf "$CHECKOUT_DIR"
+        export GIT_TERMINAL_PROMPT=0
+        run_timeout 120 git clone "$repo" "$CHECKOUT_DIR" || fail "could not clone $repo (need access? try: gh auth login)"
       fi
-    else
-      mkdir -p "$(dirname "$CHECKOUT_DIR")"
-      rm -rf "$CHECKOUT_DIR"
-      export GIT_TERMINAL_PROMPT=0
-      run_timeout 120 git clone "$repo" "$CHECKOUT_DIR" || fail "could not clone $repo (need access? try: gh auth login)"
-    fi
-  else
-    # Local path: use it directly, init git if needed.
-    mkdir -p "$repo"
-    if [[ ! -d "$repo/.git" ]]; then
-      git -C "$repo" init -q 2>/dev/null || fail "could not init git in $repo"
-    fi
-    # Point CHECKOUT_DIR at it via symlink-ish behavior: just use the path.
-    CHECKOUT_DIR="$repo"
+      ;;
+    *)
+      # local | dropbox: use the dir directly, init git if needed.
+      mkdir -p "$repo"
+      if [[ ! -d "$repo/.git" ]]; then
+        git -C "$repo" init -q 2>/dev/null || fail "could not init git in $repo"
+      fi
+      # Point CHECKOUT_DIR at it via symlink-ish behavior: just use the path.
+      CHECKOUT_DIR="$repo"
+      ;;
+  esac
+}
+
+# Commit staged content. Only meaningful for git-backed checkouts.
+commit_checkout() {
+  # $1 = dest dir, $2 = message, $3 = plugin count.
+  local dest="$1" msg="$2"
+  git -C "$dest" add -A
+  if git -C "$dest" diff --cached --quiet; then
+    info "nothing changed"
+    return 1
   fi
+  git -C "$dest" -c user.name="${GIT_AUTHOR_NAME:-omarchy}" -c user.email="${GIT_AUTHOR_EMAIL:-omarchy@localhost}" \
+    commit -q -m "$msg" || fail "commit failed"
+  info "committed: $msg"
+  return 0
 }
 
 collect_files() {
@@ -229,6 +324,11 @@ cmd_status() {
   [[ "${1:-}" == "--json" ]] && as_json=true
   local repo last theme font count
   repo="$(saved_repo)"
+  local backend
+  backend="$(resolve_backend "" "$repo")"
+  local backend_ok="true" hint=""
+  hint="$(backend_hint "$backend" "$repo")"
+  [[ -z "$hint" ]] || backend_ok="false"
   local gh_auth="false"
   gh auth status >/dev/null 2>&1 && gh_auth="true"
   last=""; theme=""; font=""; count=0
@@ -252,10 +352,12 @@ cmd_status() {
   if $as_json; then
     jq -n --arg repo "$repo" --arg last "$last" --arg host "$last_host" \
       --arg theme "$theme" --arg font "$font" --argjson count "${count:-0}" \
-      --argjson ghAuth "$gh_auth" \
-      '{repo:$repo, lastBackup:$last, lastBackupHost:$host, pluginCount:$count, theme:$theme, font:$font, ghAuth:$ghAuth}'
+      --argjson ghAuth "$gh_auth" --arg backend "$backend" \
+      --argjson backendAvailable "$backend_ok" --arg backendHint "$hint" \
+      '{repo:$repo, lastBackup:$last, lastBackupHost:$host, pluginCount:$count, theme:$theme, font:$font, ghAuth:$ghAuth, backend:$backend, backendAvailable:$backendAvailable, backendHint:$backendHint}'
   else
     echo "repo:        ${repo:-"(none — run: settings-sync-ctl set-repo <github-url>)"}"
+    echo "backend:     $backend$([[ "$backend_ok" == "true" ]] || echo " (NOT READY: $hint)")"
     echo "last backup: ${last:-"(never)"} ${last_host:+on $last_host}"
     echo "theme:       $theme"
     echo "font:        $font"
@@ -275,28 +377,66 @@ cmd_set_repo() {
   info "backup repo set to $repo"
 }
 
+# Publish staged content according to backend. $1 = dest dir, $2 = repo,
+# $3 = backend, $4 = "true" if --push was passed.
+transport_publish() {
+  local dest="$1" repo="$2" backend="$3" push="$4"
+  case "$backend" in
+    github|git)
+      if [[ "$push" == "true" ]]; then
+        run_timeout 120 git -C "$dest" push || fail "push failed (check access/credentials for $repo)"
+        info "pushed to $repo"
+      else
+        info "committed locally. Re-run with --push to upload, or push manually in $dest"
+      fi
+      ;;
+    dropbox)
+      info "committed in $dest (the Dropbox daemon syncs it)"
+      ;;
+    local)
+      info "committed in $dest"
+      ;;
+    rclone)
+      if [[ "$push" == "true" ]]; then
+        run_timeout 300 rclone sync "$dest" "$repo" || fail "rclone sync failed (is the '$repo' remote reachable? run: rclone lsf $repo)"
+        info "synced to $repo"
+      else
+        info "staged in $dest. Re-run with --push to upload to $repo"
+      fi
+      ;;
+  esac
+}
+
 cmd_backup() {
-  local push=false message="" repo_override=""
+  local push=false message="" repo_override="" backend_override=""
   while (( $# > 0 )); do
     case "$1" in
       --push) push=true; shift;;
       --message|--msg|-m) message="${2:-}"; shift 2;;
       --repo) repo_override="${2:-}"; shift 2;;
-      -h|--help) echo "usage: settings-sync-ctl backup [--push] [--message MSG] [--repo URL]"; return 0;;
+      --backend) backend_override="${2:-}"; shift 2;;
+      -h|--help) echo "usage: settings-sync-ctl backup [--push] [--message MSG] [--repo URL] [--backend NAME]"; return 0;;
       *) fail "unknown backup option: $1";;
     esac
   done
-  local repo
+  local repo backend
   repo="$(resolve_repo "$repo_override")" || fail "no repo set — run: settings-sync-ctl set-repo <github-url>"
+  backend="$(resolve_backend "$backend_override" "$repo")"
   if [[ -n "$repo_override" ]]; then printf '%s\n' "$repo" > "$REPO_FILE"; fi
+  if [[ -n "$backend_override" ]]; then printf '%s\n' "$backend" > "$BACKEND_FILE"; fi
 
-  # GitHub remotes need an authenticated `gh` — fail fast with the fix
-  # instead of collecting everything and dying on push.
-  if [[ "$repo" == *"github.com"* ]] && ! gh auth status >/dev/null 2>&1; then
+  # Fail fast with the fix instead of collecting everything and dying later.
+  local hint
+  hint="$(backend_hint "$backend" "$repo")"
+  if [[ -n "$hint" ]]; then
+    fail "storage not ready ($backend): $hint"
+  fi
+  # GitHub remotes additionally need an authenticated `gh`.
+  if [[ "$backend" == "github" ]] && ! gh auth status >/dev/null 2>&1; then
     fail "GitHub login required — run: gh auth login (needed to create the private repo and save your Omarchy settings)"
   fi
 
-  ensure_checkout "$repo"
+  ensure_checkout "$repo" "$backend"
   local dest="$CHECKOUT_DIR"
   info "collecting config into $dest …"
   local count
@@ -343,23 +483,13 @@ EOF
   if [[ -z "$msg" ]]; then
     msg="backup $(date -u +%Y-%m-%dT%H:%M:%SZ) from $(hostname) ($count plugins)"
   fi
-  git -C "$dest" add -A
-  if git -C "$dest" diff --cached --quiet; then
-    info "nothing changed — already up to date ($count plugins)"
+  if [[ "$backend" == "rclone" ]]; then
+    info "collected ($count plugins)"
   else
-    git -C "$dest" -c user.name="${GIT_AUTHOR_NAME:-omarchy}" -c user.email="${GIT_AUTHOR_EMAIL:-omarchy@localhost}" \
-      commit -q -m "$msg" || fail "commit failed"
-    info "committed: $msg"
+    commit_checkout "$dest" "$msg" || info "nothing changed — already up to date ($count plugins)"
   fi
 
-  if $push; then
-    git -C "$dest" push || fail "push failed (check access: gh auth login)"
-    info "pushed to $repo"
-  else
-    if is_remote "$repo" && git -C "$dest" remote get-url origin >/dev/null 2>&1; then
-      info "committed locally. Re-run with --push to upload, or push manually in $dest"
-    fi
-  fi
+  transport_publish "$dest" "$repo" "$backend" "$push"
 
   jq -n --arg date "$(jq -r '.date' "$dest/backup.json")" --arg host "$(hostname)" --arg repo "$repo" \
     '{date:$date, host:$host, repo:$repo}' > "$LAST_FILE"
@@ -380,33 +510,52 @@ snapshot_current() {
 }
 
 cmd_restore() {
-  local repo_override="" assume_yes=false with_packages=false skip_plugins=false skip_config=false
+  local repo_override="" backend_override="" assume_yes=false with_packages=false skip_plugins=false skip_config=false
   while (( $# > 0 )); do
     case "$1" in
       --repo) repo_override="${2:-}"; shift 2;;
+      --backend) backend_override="${2:-}"; shift 2;;
       --yes|-y) assume_yes=true; shift;;
       --with-packages) with_packages=true; shift;;
       --skip-plugins) skip_plugins=true; shift;;
       --skip-config) skip_config=true; shift;;
-      -h|--help) echo "usage: settings-sync-ctl restore [--repo URL] [--yes] [--with-packages] [--skip-plugins] [--skip-config]"; return 0;;
+      -h|--help) echo "usage: settings-sync-ctl restore [--repo URL] [--backend NAME] [--yes] [--with-packages] [--skip-plugins] [--skip-config]"; return 0;;
       *) fail "unknown restore option: $1";;
     esac
   done
-  local repo
+  local repo backend
   repo="$(resolve_repo "$repo_override")" || fail "no repo set — pass --repo <github-url>"
+  backend="$(resolve_backend "$backend_override" "$repo")"
   if [[ -n "$repo_override" ]]; then printf '%s\n' "$repo" > "$REPO_FILE"; fi
+  if [[ -n "$backend_override" ]]; then printf '%s\n' "$backend" > "$BACKEND_FILE"; fi
+
+  local hint
+  hint="$(backend_hint "$backend" "$repo")"
+  if [[ -n "$hint" ]]; then
+    fail "storage not ready ($backend): $hint"
+  fi
 
   local src=""
   local tmp=""
-  if is_remote "$repo"; then
-    tmp="$(mktemp -d)"
-    info "cloning $repo …"
-    git clone "$repo" "$tmp" || fail "could not clone $repo"
-    src="$tmp"
-  else
-    [[ -d "$repo" ]] || fail "local repo not found: $repo"
-    src="$repo"
-  fi
+  case "$backend" in
+    github|git)
+      tmp="$(mktemp -d)"
+      info "cloning $repo …"
+      export GIT_TERMINAL_PROMPT=0
+      run_timeout 120 git clone "$repo" "$tmp" || fail "could not clone $repo"
+      src="$tmp"
+      ;;
+    rclone)
+      tmp="$(mktemp -d)"
+      info "fetching $repo …"
+      run_timeout 300 rclone copy "$repo" "$tmp" || fail "could not fetch $repo (is the remote reachable? run: rclone lsf $repo)"
+      src="$tmp"
+      ;;
+    *)
+      [[ -d "$repo" ]] || fail "local repo not found: $repo"
+      src="$repo"
+      ;;
+  esac
   [[ -f "$src/backup.json" ]] || fail "not a settings-sync backup (missing backup.json in $repo)"
 
   info "backup from $(jq -r '.date // "?"' "$src/backup.json") on $(jq -r '.host // "?"' "$src/backup.json")"
@@ -546,12 +695,32 @@ cmd_list_plugins() {
   fi
 }
 
+cmd_set_backend() {
+  local backend="${1:-}"
+  valid_backend "$backend" || fail "usage: settings-sync-ctl set-backend <backend>  (pick: $VALID_BACKENDS)"
+  printf '%s\n' "$backend" > "$BACKEND_FILE"
+  info "storage backend set to $backend"
+}
+
 cmd_init() {
-  local repo="${1:-}"
-  [[ -n "$repo" ]] || fail "usage: settings-sync-ctl init <github-repo-url>  (e.g. git@github.com:you/omarchy-backup.git)"
-  printf '%s\n' "$repo" > "$REPO_FILE"
-  if command -v gh >/dev/null 2>&1 && [[ "$repo" == *"github.com"* ]]; then
-    info "hint: create the GitHub repo first with: gh repo create omarchy-backup --private --source=/tmp/empty  (or just push — GitHub accepts first push to a new repo name via gh)"
+  # init [backend] <target> — backend defaults to inference, dropbox defaults
+  # its target to ~/Dropbox/omarchy-backup.
+  local backend="" target=""
+  if valid_backend "${1:-}"; then
+    backend="$1"; target="${2:-}"
+  else
+    target="${1:-}"
+  fi
+  if [[ "$backend" == "dropbox" && -z "$target" ]]; then
+    target="$HOME/Dropbox/omarchy-backup"
+  fi
+  [[ -n "$target" ]] || fail "usage: settings-sync-ctl init [backend] <target>  (e.g. init rclone gdrive:omarchy-backup)"
+  [[ -n "$backend" ]] || backend="$(infer_backend "$target")"
+  printf '%s\n' "$target" > "$REPO_FILE"
+  printf '%s\n' "$backend" > "$BACKEND_FILE"
+  info "storage: $backend → $target"
+  if [[ "$backend" == "github" ]]; then
+    info "hint: create the GitHub repo first with: gh repo create <name> --private"
   fi
   cmd_backup --push
 }
@@ -559,7 +728,9 @@ cmd_init() {
 case "${1:-help}" in
   status) shift; cmd_status "$@";;
   set-repo|set) shift; cmd_set_repo "$@";;
+  set-backend) shift; cmd_set_backend "$@";;
   get-repo|get) saved_repo;;
+  get-backend) saved_backend;;
   backup) shift; cmd_backup "$@";;
   restore) shift; cmd_restore "$@";;
   list-plugins|plugins) cmd_list_plugins;;
@@ -567,5 +738,5 @@ case "${1:-help}" in
   -h|--help|help)
     sed -n '2,20p' "$0";;
   *)
-    echo "unknown command: $1 (try: status, backup, restore, set-repo, init)" >&2; exit 1;;
+    echo "unknown command: $1 (try: status, backup, restore, set-repo, set-backend, init)" >&2; exit 1;;
 esac

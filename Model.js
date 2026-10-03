@@ -11,7 +11,10 @@ function defaultStatus() {
     font: "",
     hasRepo: false,
     hasBackup: false,
-    ghAuth: true
+    ghAuth: true,
+    backend: "github",
+    backendAvailable: true,
+    backendHint: ""
   };
 }
 
@@ -74,6 +77,34 @@ function repoIsRemote(repo) {
   return repo.indexOf("://") !== -1 || repo.indexOf("git@") === 0;
 }
 
+function backendLabel(backend) {
+  switch (backend) {
+    case "github": return "GitHub";
+    case "git": return "Other git host";
+    case "local": return "Local folder";
+    case "dropbox": return "Dropbox folder";
+    case "rclone": return "Cloud (rclone)";
+    default: return backend || "GitHub";
+  }
+}
+
+// Whether the Back-up button may run: storage ready, and GitHub needs login.
+function canBackup(state) {
+  if (!state.backendAvailable) return false;
+  if (state.backend === "github" && !state.ghAuth) return false;
+  return true;
+}
+
+function placeholderFor(backend) {
+  switch (backend) {
+    case "git": return "git@gitlab.com:you/omarchy-backup.git";
+    case "local": return "/run/media/you/STICK/omarchy-backup";
+    case "dropbox": return "~/Dropbox/omarchy-backup";
+    case "rclone": return "gdrive:omarchy-backup";
+    default: return "https://github.com/you/omarchy-backup.git";
+  }
+}
+
 // Node exports for quick testing: `node -e "const M=require('./Model.js')..."`
 try {
   if (typeof module !== "undefined" && module.exports) {
@@ -84,7 +115,10 @@ try {
       statusLine: statusLine,
       tooltipText: tooltipText,
       glyphFor: glyphFor,
-      repoIsRemote: repoIsRemote
+      repoIsRemote: repoIsRemote,
+      backendLabel: backendLabel,
+      canBackup: canBackup,
+      placeholderFor: placeholderFor
     };
   }
 } catch (e) { /* QML has no module — ignore */ }
