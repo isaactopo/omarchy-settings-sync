@@ -5,6 +5,8 @@ install: third-party shell plugins (with git URLs + commits + enabled state),
 bar layout (`shell.json`), theme, font, Hyprland config, menu, hooks,
 terminals, starship/git/btop/lazygit, custom themes, and package lists.
 
+![Settings Sync panel](screenshots/panel.png)
+
 ## Layout
 
 ```
