@@ -361,6 +361,7 @@ Panel {
 
           Button {
             text: "Copy restore command"
+            iconText: "󰆏"
             enabled: !copyProc.running
             foreground: root.bar.foreground
             fontFamily: root.bar.fontFamily
