@@ -31,10 +31,8 @@ Panel {
   property string lastOp: "" // backup | restore — which action produced the current status
   property bool showRepoEditor: false
 
-  // The exact line a fresh machine needs; copied to the clipboard on demand.
-  readonly property string restoreCommand: root.syncState.hasRepo
-    ? "settings-sync-ctl restore --repo " + root.syncState.repo + " --yes"
-    : ""
+  // Where "Click here for the plugin info" points.
+  readonly property string repoUrl: "https://github.com/isaactopo/omarchy-settings-sync"
 
   function refresh() {
     if (!statusProc.running) statusProc.running = true
@@ -71,14 +69,6 @@ Panel {
     if (setRepoProc.running || root.repoDraft === "") return
     setRepoProc.command = [root.ctl, "set-repo", root.repoDraft]
     setRepoProc.running = true
-  }
-
-  function copyRestoreCommand() {
-    if (root.restoreCommand === "" || copyProc.running) return
-    copyProc.secret = root.restoreCommand
-    copyProc.running = true
-    root.messageKind = "info"
-    root.lastMessage = "Restore command copied to clipboard"
   }
 
   // The exit code arrives as an onExited signal argument (kit convention) —
@@ -409,36 +399,32 @@ Panel {
           visible: root.syncState.hasRepo
         }
 
-        // --- fresh install ---------------------------------------------------
-        Column {
+        // --- footer ------------------------------------------------------------
+        // A quiet link to the plugin repo. Plain underlined text with a
+        // pointing cursor: the standard link affordance, nothing invented.
+        Item {
           width: parent.width
-          spacing: Style.spacing.sm
+          height: linkText.implicitHeight
           visible: root.syncState.hasRepo
 
-          PanelSectionHeader {
-            width: parent.width
-            text: "Fresh install"
-            foreground: root.bar.foreground
-            fontFamily: root.bar.fontFamily
-          }
-
           Text {
-            width: parent.width
+            id: linkText
+            anchors.centerIn: parent
             textFormat: Text.PlainText
-            text: root.restoreCommand
-            color: root.bar.foreground
+            text: "Click here for the plugin info"
+            color: linkHover.containsMouse ? root.bar.foreground
+              : Qt.darker(root.bar.foreground, 1.4)
             font.family: root.bar.fontFamily
             font.pixelSize: Style.font.caption
-            wrapMode: Text.WrapAnywhere
+            font.underline: true
           }
 
-          Button {
-            text: "Copy restore command"
-            iconText: "󰆏"
-            enabled: !copyProc.running
-            foreground: root.bar.foreground
-            fontFamily: root.bar.fontFamily
-            onClicked: root.copyRestoreCommand()
+          MouseArea {
+            id: linkHover
+            anchors.fill: parent
+            hoverEnabled: true
+            cursorShape: Qt.PointingHandCursor
+            onClicked: Qt.openUrlExternally(root.repoUrl)
           }
         }
 
@@ -524,18 +510,6 @@ Panel {
       if (running) return
       root.showRepoEditor = false
       root.refresh()
-    }
-  }
-
-  Process {
-    id: copyProc
-    command: ["wl-copy"]
-    property string secret: ""
-    stdinEnabled: true
-    onStarted: {
-      write(secret)
-      secret = ""
-      stdinEnabled = false
     }
   }
 }
