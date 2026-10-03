@@ -50,6 +50,9 @@ sets theme/font, then rescans plugins and reloads the shell + Hyprland.
 GitHub is the default, but any of these hold the backup. Pick in the panel
 picker or with `settings-sync-ctl init <backend> <target>`:
 
+> Only GitHub is tested — the other backends are provided as-is and have
+> not been verified in real use. Report what breaks.
+
 | Backend | Target example | Needs |
 |---|---|---|
 | `github` | `https://github.com/you/omarchy-backup.git` | `gh auth login` |
