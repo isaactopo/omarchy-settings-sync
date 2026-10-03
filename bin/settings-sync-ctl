@@ -148,6 +148,19 @@ run_timeout() {
   fi
 }
 
+refuse_symlinks() {
+  # $1 = dir, $2 = what it is ("backup checkout" / "backup source").
+  # Our collects and copies write/read straight through the tree, so a
+  # repo-supplied symlink (e.g. backup.json -> ~/.ssh/id_rsa) would make us
+  # overwrite or exfiltrate a file outside the backup. Refuse the whole
+  # tree instead — same rule omarchy-plugin-validate applies to plugins.
+  local dir="$1" what="$2" link
+  link="$(find "$dir" -name .git -prune -o -type l -print -quit 2>/dev/null)"
+  if [[ -n "$link" ]]; then
+    fail "refusing $what: symlinks are not allowed in a settings-sync backup (found: $link — remove it and retry)"
+  fi
+}
+
 ensure_checkout() {
   # $1 = repo, $2 = backend. Prepares $CHECKOUT_DIR (or points it at a
   # local dir) so collect_files can write into it.
@@ -438,6 +451,7 @@ cmd_backup() {
 
   ensure_checkout "$repo" "$backend"
   local dest="$CHECKOUT_DIR"
+  refuse_symlinks "$dest" "backup checkout"
   info "collecting config into $dest …"
   local count
   count="$(collect_files "$dest")"
@@ -557,6 +571,7 @@ cmd_restore() {
       ;;
   esac
   [[ -f "$src/backup.json" ]] || fail "not a settings-sync backup (missing backup.json in $repo)"
+  refuse_symlinks "$src" "backup source"
 
   info "backup from $(jq -r '.date // "?"' "$src/backup.json") on $(jq -r '.host // "?"' "$src/backup.json")"
   info "theme: $(cat "$src/theme.txt" 2>/dev/null || echo ?) / plugins: $(jq 'length' "$src/plugins.json" 2>/dev/null || echo ?)"
