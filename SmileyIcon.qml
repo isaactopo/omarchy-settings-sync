@@ -1,63 +1,37 @@
 import QtQuick
 import QtQuick.Shapes
 
-// Small drawn smiley for success states. Vector like SyncIcon so it stays
-// crisp at any size and takes any color (no font-glyph costume).
+// Success smiley for Settings Sync. Same artwork as smiley.svg (kept next
+// to this file as the source art), drawn with Shape so `color` follows the
+// caller instead of baking in a fixed fill.
 
 Item {
   id: root
 
   property color color: "white"
 
-  implicitWidth: 16
-  implicitHeight: 16
+  implicitWidth: 24
+  implicitHeight: 24
 
   Shape {
     id: shape
     anchors.fill: parent
     preferredRendererType: Shape.CurveRenderer
 
+    // The artwork lives in a 24x24 design space; scale it onto the canvas.
+    // Scale.origin defaults to (0, 0), so the mark stays top-left aligned
+    // while it grows to fill.
     transform: Scale {
-      xScale: shape.width > 0 ? shape.width / 16 : 1
-      yScale: shape.height > 0 ? shape.height / 16 : 1
+      xScale: shape.width > 0 ? shape.width / 24 : 1
+      yScale: shape.height > 0 ? shape.height / 24 : 1
     }
 
-    // Face outline.
-    ShapePath {
-      strokeColor: root.color
-      fillColor: "transparent"
-      strokeWidth: 1.5
-
-      PathSvg {
-        path: "M1.5 8 a6.5 6.5 0 1 0 13 0 a6.5 6.5 0 1 0 -13 0"
-      }
-    }
-
-    // Smile: quadratic through a below-center control point, so the curve
-    // always dips down no matter the arc-flag reading.
-    ShapePath {
-      strokeColor: root.color
-      fillColor: "transparent"
-      strokeWidth: 1.5
-      capStyle: ShapePath.RoundCap
-      startX: 5
-      startY: 9.3
-
-      PathQuad {
-        x: 11
-        y: 9.3
-        controlX: 8
-        controlY: 12.6
-      }
-    }
-    // Eyes: filled dots in the same scaled space, so they track the face
-    // at any size.
     ShapePath {
       fillColor: root.color
       strokeColor: "transparent"
 
       PathSvg {
-        path: "M5 6.2 a0.8 0.8 0 1 0 1.6 0 a0.8 0.8 0 1 0 -1.6 0 M9.4 6.2 a0.8 0.8 0 1 0 1.6 0 a0.8 0.8 0 1 0 -1.6 0"
+        path: "M10.25 10a1.25 1.25 0 1 0-2.499 0a1.25 1.25 0 0 0 2.499 0m6 0a1.25 1.25 0 1 0-2.499 0a1.25 1.25 0 0 0 2.499 0m-6.114 5.106a.75.75 0 0 0-.772 1.286c.767.46 1.72.67 2.636.67s1.87-.21 2.636-.67a.75.75 0 1 0-.772-1.286c-.483.29-1.154.456-1.864.456s-1.38-.166-1.864-.456M22.002 12c0-5.524-4.478-10.002-10.002-10.002S2 6.476 2 12c-.001 5.523 4.476 10 10 10s10.002-4.477 10.002-10M3.499 12a8.502 8.502 0 1 1 17.003 0a8.502 8.502 0 0 1-17.003 0"
       }
     }
   }
