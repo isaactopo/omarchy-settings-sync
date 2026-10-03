@@ -38,7 +38,7 @@ calling `settings-sync-ctl`, so terminal and UI never drift.
 
 ```bash
 # 1. Install this plugin (pick one):
-omarchy plugin add https://github.com/you/omarchy-settings-sync.git --enable --yes
+omarchy plugin add https://github.com/isaactopo/omarchy-settings-sync.git --enable --yes
 # ...or local/dev:
 ./install.sh
 
