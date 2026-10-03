@@ -70,7 +70,11 @@ Panel {
     anchors.fill: parent
     bar: root.bar
     tooltipText: Model.tooltipText(root.syncState)
-    text: Model.glyphFor(root.syncState)
+    iconComponent: Component {
+      SyncIcon {
+        color: button.foreground
+      }
+    }
     onPressed: function(b) { root.toggle() }
   }
 
@@ -100,11 +104,10 @@ Panel {
           foreground: root.bar.foreground
           fontFamily: root.bar.fontFamily
           iconComponent: Component {
-            Text {
-              text: Model.glyphFor(root.syncState)
+            SyncIcon {
+              width: Style.font.display
+              height: Style.font.display
               color: root.bar.foreground
-              font.family: root.bar.fontFamily
-              font.pixelSize: Style.font.display
             }
           }
           trailingControl: Component {
