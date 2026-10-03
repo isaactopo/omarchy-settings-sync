@@ -294,41 +294,66 @@ Panel {
             wrapMode: Text.WordWrap
           }
 
-          // The backup action carries its own state: a spinner slot beside
-          // the button while working, the green smiley once done.
-          Row {
+          // The backup action carries its state inside its own button: the
+          // Button owns every interaction state (hover, pressed, disabled)
+          // while this overlay only paints the vector icon + label. Plain
+          // Items never accept mouse input, so clicks fall through to the
+          // Button's own MouseArea. The Button's text stays empty so its
+          // internal row collapses and the overlay is the only content.
+          Button {
+            id: backupBtn
             width: parent.width
-            spacing: Style.spacing.sm
+            text: ""
+            selected: true
+            enabled: !root.busy
+            foreground: root.bar.foreground
+            fontFamily: root.bar.fontFamily
+            onClicked: root.runBackup()
+
+            readonly property color labelColor: Style.selectedStateColor(foreground, accent)
+            readonly property string stateLabel: backupProc.running ? "Backing up…"
+              : (root.lastOp === "backup" && root.messageKind === "ok" ? "Backup done!" : "Back up now")
+            readonly property bool showSmiley: !backupProc.running
+              && root.lastOp === "backup" && root.messageKind === "ok"
 
             Item {
-              id: backupStateIcon
-              width: Style.space(16)
-              height: Style.space(16)
-              anchors.verticalCenter: parent.verticalCenter
+              anchors.fill: parent
+              opacity: parent.enabled ? 1 : 0.45
 
-              SpinnerIcon {
-                anchors.fill: parent
-                visible: backupProc.running
-                spinning: root.opened
-                color: root.bar.foreground
+              Row {
+                anchors.centerIn: parent
+                spacing: Style.spacing.controlGap
+
+                Item {
+                  width: Style.space(16)
+                  height: Style.space(16)
+                  anchors.verticalCenter: parent.verticalCenter
+                  visible: backupProc.running || backupBtn.showSmiley
+
+                  SpinnerIcon {
+                    anchors.fill: parent
+                    visible: backupProc.running
+                    spinning: root.opened
+                    color: backupBtn.labelColor
+                  }
+
+                  SmileyIcon {
+                    anchors.fill: parent
+                    visible: backupBtn.showSmiley
+                    color: root.successGreen()
+                  }
+                }
+
+                Text {
+                  textFormat: Text.PlainText
+                  text: backupBtn.stateLabel
+                  color: backupBtn.labelColor
+                  font.family: backupBtn.fontFamily
+                  font.pixelSize: backupBtn.fontSize
+                  font.bold: true
+                  anchors.verticalCenter: parent.verticalCenter
+                }
               }
-
-              SmileyIcon {
-                anchors.fill: parent
-                visible: !backupProc.running && root.lastOp === "backup" && root.messageKind === "ok"
-                color: root.successGreen()
-              }
-            }
-
-            Button {
-              width: parent.width - backupStateIcon.width - parent.spacing
-              text: backupProc.running ? "Backing up…"
-                : (root.lastOp === "backup" && root.messageKind === "ok" ? "Back up again" : "Back up now")
-              selected: true
-              enabled: !root.busy
-              foreground: root.bar.foreground
-              fontFamily: root.bar.fontFamily
-              onClicked: root.runBackup()
             }
           }
         }
