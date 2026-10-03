@@ -303,6 +303,11 @@ Panel {
           Button {
             id: backupBtn
             width: parent.width
+            // The Button sizes itself from its (empty) internal row, so pin
+            // the height to the kit's own formula driven by the real overlay
+            // content: content + vertical padding + reserved borders.
+            height: stateRow.implicitHeight + verticalPadding * 2
+              + _reservedBorderTop + _reservedBorderBottom
             text: ""
             selected: true
             enabled: !root.busy
@@ -321,6 +326,7 @@ Panel {
               opacity: parent.enabled ? 1 : 0.45
 
               Row {
+                id: stateRow
                 anchors.centerIn: parent
                 spacing: Style.spacing.controlGap
 
